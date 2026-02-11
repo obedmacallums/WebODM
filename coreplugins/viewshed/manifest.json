@@ -1,0 +1,13 @@
+{
+	"name": "Viewshed Analysis",
+	"webodmMinVersion": "2.5.1",
+	"description": "Compute and visualize viewshed (visible areas) from a point on DSM/DTM",
+	"version": "1.0.0",
+	"author": "Obedmacallums",
+	"email": "",
+	"repository": "https://github.com/OpenDroneMap/WebODM",
+	"tags": ["viewshed", "visibility", "dsm", "dtm"],
+	"homepage": "https://github.com/OpenDroneMap/WebODM",
+	"experimental": true,
+	"deprecated": false
+}
