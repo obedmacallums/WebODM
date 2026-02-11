@@ -1,0 +1,13 @@
+{
+	"name": "Hillshade",
+	"webodmMinVersion": "2.5.1",
+	"description": "Generate shaded relief visualization from DSM/DTM using WhiteboxTools multidirectional hillshade",
+	"version": "1.0.0",
+	"author": "Obedmacallums",
+	"email": "",
+	"repository": "https://github.com/OpenDroneMap/WebODM",
+	"tags": ["hillshade", "terrain", "dsm", "dtm", "whiteboxtools"],
+	"homepage": "https://github.com/OpenDroneMap/WebODM",
+	"experimental": true,
+	"deprecated": false
+}
