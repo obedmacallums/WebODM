@@ -1,0 +1,13 @@
+{
+    "name": "Test WebODM Plugin",
+    "webodmMinVersion": "0.7.1",
+    "description": "Plugin de prueba para WebODM",
+    "version": "0.1.0",
+    "author": "Obed Macallums",
+    "email": "",
+    "repository": "https://github.com/obedmacallums/WebODM",
+    "tags": ["test"],
+    "homepage": "https://github.com/obedmacallums/WebODM",
+    "experimental": true,
+    "deprecated": false
+}
