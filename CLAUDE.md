@@ -65,11 +65,35 @@ docker exec -it webapp bash                # Shell into container
 docker exec -it webapp python manage.py shell  # Django shell
 ```
 
+### Plugin Debug Logging
+
+For Celery worker tasks (async functions called via `run_function_async`), `print()` and Python `logging` are not easily visible. Instead, write a log file directly to the plugin directory — Docker mounts it as a volume so the file is readable from the host.
+
+```python
+LOG_FILE = "/webodm/coreplugins/<plugin_name>/<plugin_name>_debug.log"
+
+def log(msg):
+    with open(LOG_FILE, 'a') as f:
+        f.write(msg + "\n")
+        f.flush()
+
+# Clear on each run
+with open(LOG_FILE, 'w') as f:
+    f.write("")
+
+# Add a version tag to confirm worker reloaded the new code
+log("=== DEBUG v1 - {} ===".format(datetime.now().isoformat()))
+```
+
+The log file appears at `coreplugins/<plugin_name>/<plugin_name>_debug.log` on the host. Wrap the entire function body in `try/except` and log the traceback to catch errors. After changes, `docker restart worker` is required.
+
 ## Plugin System
 
 Plugins live in `coreplugins/` (built-in) or `plugins/` (user-installed). Each plugin is a Python package with a `PluginBase` subclass in `plugin.py` and a `manifest.json`.
 
 Key extension points: `main_menu()`, `app_mount_points()`, `api_mount_points()`, `include_js_files()`, `build_jsx_components()`. Plugins can have their own `public/` directory with JSX/SCSS (webpack-compiled), `templates/`, `requirements.txt`, and global/user data stores.
+
+**Important**: Every plugin's `__init__.py` must contain `from .plugin import *` — without this import the plugin won't be discovered by the framework.
 
 Use `coreplugins/hello-world/` as a starter template. For medium complexity, reference `coreplugins/measure/`.
 
@@ -86,8 +110,9 @@ Key settings (via `.env` or environment):
 
 ## Development Notes
 
-- Backend changes with `--dev`: modify Python, then touch `app/boot.py` or `docker restart webapp`
+- Backend changes with `--dev`: modify Python, then `docker restart worker webapp` to reload
 - Frontend changes with `--dev-watch-plugins`: webpack auto-recompiles JSX/SCSS in plugin `public/` dirs
+- **Note**: `localStorage` in the browser caches user settings (like slider values). After changing defaults in JSX, clear the relevant key in browser console: `localStorage.removeItem("key_name")`
 - Django settings in `webodm/settings.py`, overrides in `webodm/settings_override.py`
 - Database migrations: `python manage.py makemigrations` / `python manage.py migrate`
 - The project uses PostGIS — models use geospatial fields via `django.contrib.gis`

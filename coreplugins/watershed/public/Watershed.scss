@@ -1,0 +1,24 @@
+.leaflet-control-watershed{
+  z-index: 999 !important;
+
+  a.leaflet-control-watershed-button{
+    background: url(icon.svg) no-repeat 0 0;
+    background-size: 26px 26px;
+    border-radius: 2px;
+  }
+
+  div.watershed-panel{ display: none; }
+
+  .open{
+    a.leaflet-control-watershed-button{
+      display: none;
+    }
+
+    div.watershed-panel{
+      display: block;
+    }
+  }
+}
+.leaflet-touch .leaflet-control-watershed a {
+  background-position: 2px 2px;
+}
