@@ -65,3 +65,25 @@ Seguir la escalera del Principio IV de la constitución
 2. Dependencias de sistema → bloque `# BEGIN/END FORK PLUGIN DEPS` en el `Dockerfile`.
 3. Siempre: verificar con evidencia que el worker arranca y ejecuta el plugin sin errores
    de import antes de dar la feature por completa.
+
+## Cómo correr los tests
+
+**Regla**: la verificación oficial de tests se ejecuta **dentro de Docker**. En la
+máquina de desarrollo local (Mac Apple Silicon) solo se corren tests ligeros que no
+requieran dependencias nativas — nunca se instalan librerías geoespaciales (GDAL, PDAL,
+rasterio…) en el host para poder ejecutar un test: ese test pertenece a Docker.
+
+- **Suite completa (oficial)**: `./run_tests_in_docker.sh [args]` — construye la imagen
+  con `TEST_BUILD=ON`, levanta el stack de compose, ejecuta los tests dentro del
+  contenedor webapp y limpia todo al salir (`docker compose down -v`). Los argumentos se
+  pasan a `webodm.sh test`.
+- **Con el stack ya levantado**:
+  `docker compose exec webapp /webodm/webodm.sh test [frontend|backend] [args]`
+  - Backend de un plugin específico: `... test backend coreplugins.<nombre>.tests`
+  - Frontend: `... test frontend` (genera mocks de UI con Django y corre jest)
+- **Local en el Mac (solo tests ligeros)**: `npm run qtest` (jest puro, sin Django) o
+  tests unitarios de Python puro sin dependencias del stack.
+
+Esta regla complementa el Principio IV de la constitución: la evidencia de verificación
+(tests y arranque de workers) siempre proviene de los contenedores, que son el entorno
+real de ejecución.
