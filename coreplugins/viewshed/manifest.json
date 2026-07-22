@@ -1,0 +1,13 @@
+{
+	"name": "Viewshed",
+	"webodmMinVersion": "3.2.5",
+	"description": "Calculate and preview visible areas (viewshed) from a point on the 2D map, based on the task's elevation model",
+	"version": "1.0.0",
+	"author": "Obed Macallums",
+	"email": "obedmacallums@gmail.com",
+	"repository": "https://github.com/OpenDroneMap/WebODM",
+	"tags": ["viewshed", "visibility", "dsm", "dtm"],
+	"homepage": "https://github.com/OpenDroneMap/WebODM",
+	"experimental": false,
+	"deprecated": false
+}
