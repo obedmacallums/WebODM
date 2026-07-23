@@ -17,8 +17,14 @@ def apply_similarity(T, x, y):
             T['scale'] * (T['sin'] * x + T['cos'] * y) + T['ty'])
 
 
-def fit_similarity(pairs):
-    """Ajusta una similitud a ``pairs`` = [(sx, sy, tx, ty), ...] en un plano métrico.
+def fit_similarity(pairs, use_scale=True):
+    """Ajusta una transformación a ``pairs`` = [(sx, sy, tx, ty), ...] en un plano métrico.
+
+    Con ``use_scale=True`` (default): similitud completa (traslación + rotación + escala
+    uniforme). Con ``use_scale=False``: transformación rígida (traslación + rotación, ``scale``
+    fijo en 1.0) — ver D9 en research.md. La rotación (``cos``/``sin``) es idéntica en ambos
+    modos: sale de normalizar el mismo numerador de covarianza cruzada (``a``, ``b``) por
+    ``hypot(a, b)`` en vez de por ``sxx``; solo cambian ``scale`` y, por lo tanto, la traslación.
 
     Devuelve un dict con: ok, degenerate, n, scale, rotation, rotation_deg, tx, ty, cos, sin,
     residuals (por punto) y rmse. Misma semántica que ``fitSimilarity`` en el frontend.
@@ -53,17 +59,26 @@ def fit_similarity(pairs):
             base['degenerate'] = True
             return base
 
-        wx = a / sxx
-        wy = b / sxx
-        scale = math.hypot(wx, wy)
-        if scale < EPS:
-            base['degenerate'] = True
-            return base
+        if use_scale:
+            wx = a / sxx
+            wy = b / sxx
+            scale = math.hypot(wx, wy)
+            if scale < EPS:
+                base['degenerate'] = True
+                return base
+            cos = wx / scale
+            sin = wy / scale
+        else:
+            norm = math.hypot(a, b)
+            if norm < EPS:
+                base['degenerate'] = True
+                return base
+            scale = 1.0
+            cos = a / norm
+            sin = b / norm
 
-        cos = wx / scale
-        sin = wy / scale
-        tx = mutx - (wx * musx - wy * musy)
-        ty = muty - (wy * musx + wx * musy)
+        tx = mutx - (scale * cos * musx - scale * sin * musy)
+        ty = muty - (scale * sin * musx + scale * cos * musy)
         T = dict(scale=scale, cos=cos, sin=sin, tx=tx, ty=ty)
 
     residuals = []
@@ -108,7 +123,7 @@ def reproject_points(points, dst_epsg, src_epsg=4326):
     return pairs
 
 
-def similarity_from_latlng(points, dst_epsg):
-    """Reproyecta ``points`` (lat/lng) al CRS de la tarea y ajusta la similitud ahí."""
+def similarity_from_latlng(points, dst_epsg, use_scale=True):
+    """Reproyecta ``points`` (lat/lng) al CRS de la tarea y ajusta ahí (ver ``fit_similarity``)."""
     pairs = reproject_points(points, dst_epsg)
-    return fit_similarity(pairs)
+    return fit_similarity(pairs, use_scale=use_scale)

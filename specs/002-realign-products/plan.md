@@ -138,3 +138,13 @@ aplicar— y ambas se cubren con tests de paridad sobre los mismos casos.
 ## Complexity Tracking
 
 > Sin violaciones constitucionales que justificar — tabla vacía.
+
+## Actualización — Interruptor de escala (User Story 5, 2026-07-23)
+
+Ampliación planeada en `research.md` (D9), `data-model.md` (campo `use_scale` en
+`SimilarityTransform`) y `contracts/api.md` (campo `use_scale` en `PUT state` / `POST apply`).
+**No agrega archivos nuevos ni dependencias**: es un branch dentro de las mismas funciones de
+ajuste (`public/similarity.js`, `transform.py`), un campo nuevo en el documento persistido
+(`store.py`/`api.py`) y un control en `RealignPanel.jsx`. Constitution Check no cambia (sigue
+PASS en los 5 gates: nada nuevo toca el core, no hay dependencias nuevas, mismo mecanismo de
+persistencia `PluginDatum`).

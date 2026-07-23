@@ -8,6 +8,8 @@
 
 **Input**: User description: "Plugin 'realign' para la vista 2D de una tarea procesada. Permite corregir la posición de los productos ráster (ortofoto, DSM y DTM) cuando no cuadran con el mapa base de fondo (OpenStreetMap, Google, etc.), un desajuste frecuente por imprecisiones de georreferenciación. El usuario marca pares de puntos de control (rasgo en la ortofoto → mismo rasgo en el mapa base), el sistema calcula una transformación de similitud, previsualiza el desplazamiento, muestra el error por punto y el RMSE, y con un botón Aplicar genera productos corregidos conservando los originales, con opción de Revertir. La transformación persiste asociada a la tarea. Fase futura: extender a la nube de puntos."
 
+**Update — 2026-07-23**: "Agregar un interruptor 'Usar escala' en el panel de puntos de control. Tildado por defecto (similitud completa, comportamiento actual); destildado, la transformación se limita a traslación y rotación (escala fija en 1.0). El modo elegido recalcula en vivo los residuos y el RMSE, y se persiste junto con los puntos para que Aplicar y la recuperación del estado lo respeten."
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Alinear los rásteres marcando pares de puntos y ver el error en vivo (Priority: P1)
@@ -130,12 +132,52 @@ se recuperan igual que quedaron.
 
 ---
 
+### User Story 5 - Elegir si la transformación incluye escala (Priority: P2)
+
+Cuando el desajuste entre la ortofoto y el mapa base es solo de posición y orientación (no de
+tamaño), el usuario quiere corregirlo sin arriesgarse a que el ajuste introduzca una escala
+espuria por puntos mal marcados o poco separados. Para eso, junto al resumen de la
+transformación, tildado por defecto y activo el comportamiento actual (similitud completa). El
+usuario puede destildarlo para forzar una transformación rígida: solo traslación y rotación, con
+la escala fija en 1.0. El modo elegido se persiste junto con los puntos.
+
+**Why this priority**: refina la calidad y confiabilidad del ajuste de US1 en el caso frecuente
+de desajustes puramente posicionales, evitando que una escala mal estimada deforme el resultado.
+No es imprescindible para el valor base (US1 ya funciona con escala), pero es una mejora real de
+control para el usuario.
+
+**Independent Test**: con dos o más pares marcados y la previsualización activa, destildar "Usar
+escala" y verificar que (a) la transformación pasa a ser rígida (la escala mostrada es 1.0), (b)
+los residuos y el RMSE se recalculan de inmediato reflejando el nuevo ajuste, y (c) al volver a
+tildarlo se recupera el ajuste con escala.
+
+**Acceptance Scenarios**:
+
+1. **Given** la herramienta activa y ningún punto marcado, **When** el usuario abre el panel,
+   **Then** el interruptor "Usar escala" aparece tildado por defecto.
+2. **Given** dos o más pares marcados con el interruptor tildado, **When** el usuario lo
+   destilda, **Then** la transformación se recalcula como rígida (traslación y rotación, escala
+   1.0) y los residuos y el RMSE se actualizan de inmediato.
+3. **Given** la transformación en modo rígido, **When** el usuario vuelve a tildar el
+   interruptor, **Then** la transformación se recalcula como similitud completa y los residuos y
+   el RMSE se actualizan de inmediato.
+4. **Given** exactamente un par marcado, **When** el usuario cambia el interruptor en cualquier
+   sentido, **Then** el resultado no cambia (con un solo par ya se aplica únicamente traslación).
+5. **Given** un modo de escala elegido (tildado o no) y puntos marcados, **When** el usuario pulsa
+   "Aplicar", **Then** los productos corregidos usan el modo vigente en ese momento.
+6. **Given** una realineación guardada con un modo de escala elegido, **When** el usuario recarga
+   o reabre la tarea, **Then** el interruptor se recupera en el mismo estado en que quedó, junto
+   con los puntos.
+
+---
+
 ### Edge Cases
 
 - **Tarea sin productos ráster 2D**: la herramienta no se activa e informa que no hay nada que
   realinear.
 - **Cero puntos**: no hay transformación; la vista permanece en el estado original.
-- **Un solo punto**: solo se aplica traslación (no hay rotación ni escala estimables).
+- **Un solo punto**: solo se aplica traslación (no hay rotación ni escala estimables); el
+  interruptor "Usar escala" no tiene efecto en este caso.
 - **Ajuste degenerado**: pares cuyos puntos de origen coinciden o son insuficientes para estimar
   la similitud; el sistema lo detecta, avisa y no permite aplicar hasta que el ajuste sea válido.
 - **Error muy alto (RMSE)**: el sistema muestra el error de forma destacada pero no bloquea al
@@ -146,6 +188,8 @@ se recuperan igual que quedaron.
   aplicar ni revertir; el sistema se lo indica.
 - **Productos parciales**: si la tarea tiene ortofoto pero no DSM/DTM (o viceversa), se realinean
   los productos ráster 2D que existan.
+- **Corrección ya aplicada al cambiar el modo de escala**: cambiar el interruptor solo afecta al
+  próximo cálculo/aplicación; no modifica productos ya corregidos con una transformación previa.
 
 ## Requirements *(mandatory)*
 
@@ -160,9 +204,11 @@ se recuperan igual que quedaron.
   y representar cada par visualmente.
 - **FR-004**: El sistema MUST permitir añadir, mover y eliminar pares de puntos, recalculando la
   transformación y los errores tras cada cambio.
-- **FR-005**: El sistema MUST calcular una transformación de similitud (traslación, rotación y
-  escala uniforme, sin deformación local) a partir de los pares de puntos: con un solo par, solo
-  traslación; con dos o más, ajuste por mínimos cuadrados.
+- **FR-005**: El sistema MUST calcular, a partir de los pares de puntos, una transformación según
+  el modo elegido por el usuario (ver FR-018): con escala habilitada, una similitud completa
+  (traslación, rotación y escala uniforme, sin deformación local); con escala deshabilitada, una
+  transformación rígida (traslación y rotación, escala fija en 1.0). En cualquier modo, con un
+  solo par MUST aplicar únicamente traslación; con dos o más, ajuste por mínimos cuadrados.
 - **FR-006**: El sistema MUST mostrar, en todo momento durante la edición, el error residual de
   cada punto y un error global (RMSE), y actualizarlos de inmediato ante cualquier cambio en los
   puntos.
@@ -194,16 +240,26 @@ se recuperan igual que quedaron.
 - **FR-017**: El diseño de la transformación y su persistencia MUST ser independiente del tipo de dato
   (no cerrarse a los rásteres) para permitir, en una etapa posterior, aplicar la misma transformación
   a la nube de puntos.
+- **FR-018**: El sistema MUST ofrecer un control para habilitar o deshabilitar el uso de escala en
+  la transformación, visible junto al resumen del ajuste (RMSE/Escala/Rotación), habilitado
+  (tildado) por defecto.
+- **FR-019**: El sistema MUST recalcular de inmediato la transformación, los residuos por punto y
+  el RMSE al cambiar el modo de escala, con el mismo criterio de inmediatez que ante cualquier
+  cambio en los puntos (FR-004, FR-006).
+- **FR-020**: El sistema MUST persistir el modo de escala elegido junto con los pares de puntos y
+  el estado de la tarea (FR-012), de modo que se recupere al reabrir la tarea (FR-013) y que
+  "Aplicar" use el modo vigente en el momento de aplicarse.
 
 ### Key Entities *(include if feature involves data)*
 
 - **Par de puntos de control**: correspondencia entre un punto de origen (posición actual sobre el
   producto) y un punto de destino (posición correcta sobre el mapa base). Tras el ajuste tiene un
   residuo de error asociado.
-- **Transformación de realineación**: modelo de similitud calculado a partir de los pares de puntos;
-  incluye sus parámetros (traslación, rotación, escala), sus métricas de error (residuos por punto y
-  RMSE) y su estado (previsualizado, aplicado o revertido). Su representación es independiente del tipo
-  de producto al que se aplica.
+- **Transformación de realineación**: modelo calculado a partir de los pares de puntos, en modo
+  similitud completa o rígido según el interruptor de escala; incluye sus parámetros (traslación,
+  rotación y, si el modo lo incluye, escala), sus métricas de error (residuos por punto y RMSE), el
+  modo de escala elegido y su estado (previsualizado, aplicado o revertido). Su representación es
+  independiente del tipo de producto al que se aplica.
 - **Estado de realineación de la tarea**: asociación persistente entre una tarea y su transformación;
   registra qué productos abarca y mantiene la referencia a los productos originales y, cuando existe, a
   los productos corregidos.
@@ -215,7 +271,8 @@ se recuperan igual que quedaron.
 - **SC-001**: Un usuario puede corregir una ortofoto claramente desplazada hasta que cuadre
   visualmente con el mapa base marcando entre 2 y 4 pares de puntos, en menos de 3 minutos.
 - **SC-002**: El error por punto y el RMSE se muestran y se actualizan de forma percibida como
-  inmediata (en menos de 1 segundo) tras marcar, mover o eliminar un punto.
+  inmediata (en menos de 1 segundo) tras marcar, mover o eliminar un punto, o tras cambiar el modo
+  de escala.
 - **SC-003**: Tras aplicar, los productos corregidos coinciden con el mapa base dentro de una
   tolerancia coherente con el RMSE alcanzado durante la previsualización.
 - **SC-004**: La acción "Revertir" restaura el estado original el 100% de las veces sin pérdida ni
@@ -224,6 +281,8 @@ se recuperan igual que quedaron.
   veces al reabrir la tarea o al abrirla otro usuario con acceso.
 - **SC-006**: Todos los productos ráster 2D disponibles quedan alineados de forma consistente entre sí
   tras aplicar (no aparecen desalineaciones relativas entre ortofoto, DSM y DTM).
+- **SC-007**: Un usuario puede alternar entre transformación con y sin escala, comparar el RMSE de
+  cada modo con los mismos puntos, y elegir el que prefiera sin perder los puntos marcados.
 
 ## Assumptions
 
@@ -240,3 +299,6 @@ se recuperan igual que quedaron.
 - El permiso para "Aplicar" y "Revertir" se deriva del permiso de edición existente sobre la tarea o su
   proyecto; no se introduce un modelo de permisos nuevo.
 - La feature aplica a tareas ya procesadas que disponen de al menos un producto ráster 2D.
+- Por defecto la transformación incluye escala (comportamiento histórico del plugin); el usuario
+  puede optar por una transformación rígida (sin escala) cuando el desajuste es solo de posición y
+  orientación, no de tamaño.

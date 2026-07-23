@@ -32,7 +32,7 @@ productos 2D disponibles para realinear.
     {"id": 1, "source": {"lat": 0.0, "lng": 0.0}, "target": {"lat": 0.0, "lng": 0.0},
      "residual_m": 0.12, "enabled": true}
   ],
-  "transform": {"crs": "EPSG:32617", "scale": 1.0002, "rotation_deg": 0.35,
+  "transform": {"crs": "EPSG:32617", "use_scale": true, "scale": 1.0002, "rotation_deg": 0.35,
                  "translation": {"x": 1.8, "y": -0.9}, "n_points": 3, "rmse_m": 0.14,
                  "degenerate": false},
   "products": ["orthophoto", "dsm", "dtm"],
@@ -50,8 +50,13 @@ residuos recalculados de forma autoritativa en el backend.
 
 **Body**
 ```json
-{ "points": [ {"id": 1, "source": {"lat": .., "lng": ..}, "target": {"lat": .., "lng": ..}, "enabled": true} ] }
+{ "points": [ {"id": 1, "source": {"lat": .., "lng": ..}, "target": {"lat": .., "lng": ..}, "enabled": true} ],
+  "use_scale": true }
 ```
+`use_scale` es opcional; si se omite, se conserva el último valor persistido (o `true` si no hay
+ninguno todavía). Al cambiarlo, la respuesta refleja el ajuste recalculado en el nuevo modo
+(FR-018 a FR-020).
+
 **200 OK**: mismo shape que `GET state`, con `transform` y `residual_m`/`rmse_m` recalculados.
 **400**: puntos fuera de rango o ajuste degenerado (`transform.degenerate=true`); no impide
 guardar, pero marca el estado como no aplicable.
@@ -70,7 +75,8 @@ corregidos del directorio persistente. **200 OK** `{ "ok": true }`.
 Lanza el pipeline asíncrono que genera los COG corregidos desde los **originales** (FR-010) para
 todos los productos disponibles y marca el estado `applied` al terminar.
 
-**Body** (opcional) `{ "points": [...] }` para aplicar con los puntos actuales.
+**Body** (opcional) `{ "points": [...], "use_scale": true }` para aplicar con los puntos y el modo
+de escala actuales; si se omite `use_scale`, usa el último persistido.
 **200 OK** `{ "celery_task_id": "<id>" }` (patrón `run_function_async`, como viewshed).
 **400**: sin puntos suficientes o ajuste degenerado (FR-015) → no lanza el pipeline.
 **403**: sin permiso `change_project` (FR-014).

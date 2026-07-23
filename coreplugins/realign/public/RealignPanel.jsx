@@ -33,6 +33,7 @@ export default class RealignPanel extends React.Component {
         products: [],
         points: [],          // [{id, source:{lat,lng}, target:{lat,lng}, residual}]
         transform: null,     // {scale, rotationDeg, rmse, degenerate, n}
+        useScale: true,      // false = transformación rígida (traslación+rotación, sin escala)
         captureMode: 'idle', // 'idle' | 'source' | 'target'
         applied: false,
         busy: false,
@@ -102,15 +103,18 @@ export default class RealignPanel extends React.Component {
   restoreState = (res, cb) => {
     // 'applying' (job interrumpido) se trata como previsualización recuperable.
     const applied = res.state === 'applied';
+    // Estados persistidos antes de esta capacidad no tienen use_scale: se interpretan como true
+    // (preserva el comportamiento con el que se crearon — FR-020, D9).
+    const useScale = (res.transform && typeof res.transform.use_scale === 'boolean') ? res.transform.use_scale : true;
     if (Array.isArray(res.points) && res.points.length){
       const points = res.points.map(p => ({
         id: (typeof p.id === 'number' ? p.id : this._nextId++),
         source: p.source, target: p.target, residual: p.residual_m
       }));
       this._nextId = Math.max(this._nextId, ...points.map(p => p.id)) + 1;
-      this.setState({points, applied}, cb);
+      this.setState({points, applied, useScale}, cb);
     }else{
-      this.setState({applied}, cb);
+      this.setState({applied, useScale}, cb);
     }
   }
 
@@ -303,6 +307,12 @@ export default class RealignPanel extends React.Component {
     this.setState({points: [], transform: null}, () => { this._fit = null; this.persistState(); });
   }
 
+  handleToggleScale = (e) => {
+    const useScale = e.target.checked;
+    this.exitApplied();
+    this.setState({useScale}, () => { this.recompute(); this.persistState(); });
+  }
+
   // --- Recalculo -----------------------------------------------------------
 
   serializePoints = () => this.state.points.map(p => ({id: p.id, source: p.source, target: p.target, enabled: true}));
@@ -320,7 +330,7 @@ export default class RealignPanel extends React.Component {
       return {sx: s.x, sy: s.y, tx: t.x, ty: t.y};
     });
 
-    const fit = fitSimilarity(pairs);
+    const fit = fitSimilarity(pairs, this.state.useScale);
     this._fit = fit;
 
     let rmseM = null;
@@ -345,7 +355,8 @@ export default class RealignPanel extends React.Component {
   persistState = () => {
     // Requiere change_project; para usuarios de solo lectura el 404 se ignora en silencio.
     return $.ajax({type: 'PUT', url: `${this.apiBase()}/state`,
-                   data: JSON.stringify({points: this.serializePoints()}), contentType: 'application/json'})
+                   data: JSON.stringify({points: this.serializePoints(), use_scale: this.state.useScale}),
+                   contentType: 'application/json'})
             .fail(() => {});
   }
 
@@ -354,7 +365,8 @@ export default class RealignPanel extends React.Component {
     const token = ++this._applyToken;
     this.setState({busy: true, error: ""});
     $.ajax({type: 'POST', url: `${this.apiBase()}/apply`,
-            data: JSON.stringify({points: this.serializePoints()}), contentType: 'application/json'})
+            data: JSON.stringify({points: this.serializePoints(), use_scale: this.state.useScale}),
+            contentType: 'application/json'})
       .done(res => {
         if (token !== this._applyToken) return; // acción posterior invalidó este apply
         if (res.celery_task_id){
@@ -395,7 +407,7 @@ export default class RealignPanel extends React.Component {
   fmt = (v, digits = 2) => (v === null || v === undefined || isNaN(v)) ? "—" : Number(v).toFixed(digits);
 
   render(){
-    const { checkingAvailability, permanentError, products, points, transform, captureMode, applied, busy } = this.state;
+    const { checkingAvailability, permanentError, products, points, transform, useScale, captureMode, applied, busy } = this.state;
 
     let content = "";
     if (checkingAvailability){
@@ -446,6 +458,15 @@ export default class RealignPanel extends React.Component {
               ))}
             </tbody>
           </table> : ""}
+
+        <div className="row realign-scale-toggle">
+          <div className="col-sm-12">
+            <label>
+              <input type="checkbox" checked={useScale} onChange={this.handleToggleScale} disabled={busy} />{" "}
+              {_("Usar escala")}
+            </label>
+          </div>
+        </div>
 
         {transform && !degenerate ?
           <div className="realign-summary">

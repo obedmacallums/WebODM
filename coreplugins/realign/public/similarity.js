@@ -20,10 +20,12 @@ export function applySimilarity(T, x, y) {
     };
 }
 
-// pairs: [{sx, sy, tx, ty}] en un plano métrico.
+// pairs: [{sx, sy, tx, ty}] en un plano métrico. useScale=true (default): similitud completa;
+// false: transformación rígida (traslación+rotación, scale fijo en 1) — ver D9 en research.md.
+// La rotación es idéntica en ambos modos (mismo numerador a/b, solo cambia la normalización).
 // Devuelve { ok, degenerate, n, scale, rotation, rotationDeg, tx, ty, cos, sin,
 //            residuals: [dist...], rmse }.
-export function fitSimilarity(pairs) {
+export function fitSimilarity(pairs, useScale = true) {
     const n = pairs.length;
 
     const base = {
@@ -64,19 +66,28 @@ export function fitSimilarity(pairs) {
             return { ...base, degenerate: true };
         }
 
-        const wx = a / sxx; // Re(w) = scale·cos θ
-        const wy = b / sxx; // Im(w) = scale·sin θ
-        const scale = Math.hypot(wx, wy);
-
-        if (scale < EPS) {
-            return { ...base, degenerate: true };
+        let scale, cos, sin;
+        if (useScale) {
+            const wx = a / sxx; // Re(w) = scale·cos θ
+            const wy = b / sxx; // Im(w) = scale·sin θ
+            scale = Math.hypot(wx, wy);
+            if (scale < EPS) {
+                return { ...base, degenerate: true };
+            }
+            cos = wx / scale;
+            sin = wy / scale;
+        } else {
+            const norm = Math.hypot(a, b);
+            if (norm < EPS) {
+                return { ...base, degenerate: true };
+            }
+            scale = 1;
+            cos = a / norm;
+            sin = b / norm;
         }
-
-        const cos = wx / scale;
-        const sin = wy / scale;
-        // c = μt − w·μs
-        const tx = mutx - (wx * musx - wy * musy);
-        const ty = muty - (wy * musx + wx * musy);
+        // c = μt − w·μs (w = scale·cos + i·scale·sin)
+        const tx = mutx - (scale * cos * musx - scale * sin * musy);
+        const ty = muty - (scale * sin * musx + scale * cos * musy);
         T = { scale, cos, sin, tx, ty };
     }
 

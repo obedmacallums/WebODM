@@ -31,7 +31,8 @@ Modelo ajustado a partir de los pares habilitados. Independiente del tipo de dat
 | Campo | Tipo | Descripción |
 |---|---|---|
 | `crs` | string (p. ej. `EPSG:32617`) | CRS proyectado en el que se ajustó y se aplica la similitud |
-| `scale` | float | factor de escala uniforme (1.0 = sin cambio) |
+| `use_scale` | bool | modo elegido por el usuario: `true` = similitud completa, `false` = rígida (sin escala). Default `true` |
+| `scale` | float | factor de escala uniforme (1.0 = sin cambio; siempre 1.0 si `use_scale=false`) |
 | `rotation_deg` | float | rotación en grados (0 = sin giro) |
 | `translation` | `{x, y}` | traslación en unidades del CRS (metros) |
 | `n_points` | int | nº de pares habilitados usados en el ajuste |
@@ -39,11 +40,18 @@ Modelo ajustado a partir de los pares habilitados. Independiente del tipo de dat
 | `degenerate` | bool | true si los puntos no permiten un ajuste válido |
 
 **Reglas**:
-- 1 par ⇒ `scale=1`, `rotation_deg=0`, solo `translation` (FR-005).
-- 2+ pares ⇒ ajuste Umeyama por mínimos cuadrados (FR-005).
-- `rmse_m` y `residual_m` de cada par se recalculan ante cualquier cambio de puntos (FR-006).
+- 1 par ⇒ `scale=1`, `rotation_deg=0`, solo `translation`, sin importar `use_scale` (FR-005).
+- 2+ pares y `use_scale=true` ⇒ ajuste Umeyama por mínimos cuadrados, similitud completa (FR-005).
+- 2+ pares y `use_scale=false` ⇒ ajuste rígido por mínimos cuadrados (rotación + traslación,
+  `scale` fijo en 1.0) — mismo procedimiento de D9 en `research.md` (FR-005, FR-018).
+- `use_scale` es una elección del usuario, no un valor derivado; se recibe del cliente y se
+  persiste tal cual (FR-018, FR-020).
+- `rmse_m` y `residual_m` de cada par se recalculan ante cualquier cambio de puntos **o de
+  `use_scale`** (FR-006, FR-019).
 - Se recalcula de forma autoritativa en el backend al aplicar, a partir de los `source`/`target`
-  persistidos (no se confía en el cálculo del cliente para el resultado final).
+  y el `use_scale` persistidos (no se confía en el cálculo del cliente para el resultado final).
+- Estados persistidos sin el campo `use_scale` (creados antes de esta capacidad) se interpretan
+  como `use_scale=true`, preservando el comportamiento con el que se aplicaron.
 
 ## Entidad: TaskRealignment (estado de realineación de la tarea)
 

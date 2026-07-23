@@ -36,3 +36,7 @@
   decisiones críticas (modelo de transformación = similitud, alcance = rásteres 2D juntos, UI de
   puntos = un mapa con dos clics por par, flujo aplicar/revertir con persistencia y permisos por
   edición de la tarea).
+- **Actualización 2026-07-23** (interruptor "Usar escala", User Story 5, FR-018 a FR-020):
+  re-validada contra el mismo checklist, sin marcadores [NEEDS CLARIFICATION]. El único punto
+  ambiguo (estado por defecto del interruptor) se resolvió con un supuesto razonable y explícito
+  (tildado por defecto, preserva el comportamiento histórico) documentado en Assumptions.

@@ -138,6 +138,34 @@ y el inventario de `docs/entorno-plugins.md`. **Ninguna requiere dependencias nu
 - **Alternativas descartadas**: acoplar la transformación al pipeline ráster (obligaría a
   refactorizar al añadir la nube de puntos).
 
+## D9 — Interruptor de escala (similitud completa vs. transformación rígida)
+
+- **Decisión**: agregar un parámetro booleano `use_scale` (default `true`) a las dos
+  implementaciones del ajuste (`public/similarity.js` en el cliente y `transform.py` en el
+  backend). Con `use_scale=true`, el ajuste es el de D1 (similitud completa, Umeyama). Con
+  `use_scale=false`, se reutilizan los mismos términos ya calculados de covarianza cruzada
+  (`a = Σ(dsx·dtx + dsy·dty)`, `b = Σ(dsx·dty − dsy·dtx)`) pero normalizados directamente por
+  `hypot(a, b)` en vez de por `sxx` — esto da `cos, sin` de norma unitaria (rotación óptima sin
+  escala) con `scale` fijo en `1.0`; la traslación se recalcula desde los centroides con esa
+  rotación fija, igual que hoy. Con 1 par, el modo no tiene efecto (ya es solo traslación, FR-005).
+- **Rationale**: es el caso degenerado estándar de Umeyama con escala deshabilitada (Procrustes
+  ortogonal) — matemáticamente es el mismo problema de mínimos cuadrados, solo cambia cómo se
+  normaliza el numerador/denominador ya calculado. El diff es mínimo en ambas implementaciones (un
+  branch en la misma función, no una función nueva), no agrega dependencias, y conserva la
+  paridad JS↔Python que ya exige D1 (los tests de paridad existentes se extienden con los mismos
+  casos en ambos modos).
+- **Alternativas descartadas**: recalcular el ajuste rígido con una ruta de código separada
+  (SVD/Procrustes desde cero) — mismo resultado con más código duplicado que mantener en
+  paridad; "deshacer" la escala después del ajuste completo (dividir la traslación/rotación por
+  el `scale` ya ajustado) — **no es un mínimo cuadrado válido para el problema restringido**: da
+  una rotación y traslación subóptimas (el ajuste con escala optimiza para minimizar el residuo
+  *con* esa escala; forzar `scale=1` a posteriori no reoptimiza rotación/traslación alrededor de
+  esa restricción), sesgando los residuos y el RMSE mostrados al usuario.
+- **Dónde se persiste**: `use_scale` viaja junto con `points` en el mismo documento
+  `TaskRealignment` (D6) — no es un dato derivado, es una elección del usuario que el sistema debe
+  recordar (FR-020). Los estados persistidos **antes** de este cambio no tienen el campo; se asume
+  `use_scale=true` si está ausente (preserva el comportamiento con el que se aplicaron).
+
 ## Resumen de dependencias
 
 **Nivel 0 de la escalera del Principio IV — cero dependencias nuevas.** GDAL 3.4 (CLI + driver

@@ -94,6 +94,43 @@ class RealignStateTest(BootTestCase):
         self.assertEqual(len(res2.data['points']), 3)
         self.assertEqual(res2.data['state'], 'previewing')
 
+    def test_put_state_use_scale_default_and_persistence(self):
+        """T049 — use_scale por defecto True; se persiste y se conserva si se omite en llamadas
+        posteriores (FR-018/FR-020)."""
+        task = self._task(self._project())
+        self.client.login(username="testuser", password="test1234")
+
+        # Sin use_scale en el body → default True.
+        res = self.client.put(self._url(task), {'points': POINTS_OK}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertTrue(res.data['transform']['use_scale'])
+        scale_with = res.data['transform']['scale']
+
+        # use_scale=False → transformación rígida (scale exactamente 1.0), y distinta de la anterior.
+        res2 = self.client.put(self._url(task), {'points': POINTS_OK, 'use_scale': False}, format='json')
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.assertFalse(res2.data['transform']['use_scale'])
+        self.assertEqual(res2.data['transform']['scale'], 1.0)
+        self.assertNotEqual(scale_with, 1.0)
+
+        # Se omite use_scale en la siguiente llamada → se conserva el último persistido (False).
+        res3 = self.client.put(self._url(task), {'points': POINTS_OK}, format='json')
+        self.assertFalse(res3.data['transform']['use_scale'])
+
+        # GET refleja el mismo valor persistido.
+        res4 = self.client.get(self._url(task))
+        self.assertFalse(res4.data['transform']['use_scale'])
+
+    def test_apply_uses_requested_use_scale(self):
+        """T049 — POST apply acepta use_scale y lo refleja en la transformación persistida."""
+        task = self._task(self._project())
+        self.client.login(username="testuser", password="test1234")
+        res = self.client.post(self._url(task, "apply"), {'points': POINTS_OK, 'use_scale': False}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        state_res = self.client.get(self._url(task))
+        self.assertFalse(state_res.data['transform']['use_scale'])
+        self.assertEqual(state_res.data['transform']['scale'], 1.0)
+
     def test_put_state_requires_change_project(self):
         project = self._project()
         assign_perm('view_project', User.objects.get(username="testuser2"), project)
@@ -290,6 +327,42 @@ class RealignTransformTest(unittest.TestCase):
 
     def test_degenerate_coincident_sources(self):
         r = transform.fit_similarity([(0, 0, 1, 1), (0, 0, 2, 2)])
+        self.assertTrue(r['degenerate'])
+        self.assertFalse(r['ok'])
+
+    def test_rigid_mode_fixes_scale_to_one(self):
+        """T048 — use_scale=False: escala fija en 1.0, misma rotación que con escala (D9,
+        el numerador a/b no depende de la normalización), traslación distinta y RMSE real
+        (forzar escala=1 sobre datos con escala verdadera 2.0 no es un ajuste perfecto)."""
+        import math
+        T = dict(scale=2.0, cos=math.cos(math.pi / 2), sin=math.sin(math.pi / 2), tx=100.0, ty=50.0)
+        srcs = [(0, 0), (10, 0), (0, 10), (7, 3), (-5, 8)]
+        pairs = []
+        for x, y in srcs:
+            qx, qy = transform.apply_similarity(T, x, y)
+            pairs.append((x, y, qx, qy))
+
+        r_scale = transform.fit_similarity(pairs, use_scale=True)
+        r_rigid = transform.fit_similarity(pairs, use_scale=False)
+
+        self.assertAlmostEqual(r_scale['scale'], 2.0, places=6)
+        self.assertLess(r_scale['rmse'], 1e-6)
+
+        self.assertAlmostEqual(r_rigid['scale'], 1.0, places=9)
+        self.assertAlmostEqual(r_rigid['rotation_deg'], r_scale['rotation_deg'], places=6)
+        self.assertAlmostEqual(r_rigid['tx'], 95.8, places=5)
+        self.assertAlmostEqual(r_rigid['ty'], 52.4, places=5)
+        self.assertGreater(r_rigid['rmse'], 1.0)
+
+    def test_rigid_mode_single_point_unaffected(self):
+        r = transform.fit_similarity([(0, 0, 10, 5)], use_scale=False)
+        self.assertAlmostEqual(r['scale'], 1.0)
+        self.assertAlmostEqual(r['rotation_deg'], 0.0)
+        self.assertAlmostEqual(r['tx'], 10.0)
+        self.assertAlmostEqual(r['ty'], 5.0)
+
+    def test_rigid_mode_degenerate_coincident_sources(self):
+        r = transform.fit_similarity([(0, 0, 1, 1), (0, 0, 2, 2)], use_scale=False)
         self.assertTrue(r['degenerate'])
         self.assertFalse(r['ok'])
 

@@ -80,19 +80,27 @@ def _validate_points(raw):
     return points, None
 
 
-def _fit_for_task(task, points):
+def _fit_for_task(task, points, use_scale=True):
     enabled = [p for p in points if p.get('enabled', True)]
-    return transform.similarity_from_latlng(enabled, task.epsg or 4326)
+    return transform.similarity_from_latlng(enabled, task.epsg or 4326, use_scale=use_scale)
 
 
-def _transform_dict(fit, epsg):
+def _transform_dict(fit, epsg, use_scale):
     # Los valores (translation, cos/sin, scale) están en las unidades de este CRS proyectado;
     # se guarda el EPSG para poder reinterpretarlos (p. ej. reusarlos en la nube de puntos, FR-017).
     return {
-        'crs': 'EPSG:{}'.format(epsg), 'scale': fit['scale'], 'rotation_deg': fit['rotation_deg'],
-        'translation': {'x': fit['tx'], 'y': fit['ty']}, 'cos': fit['cos'], 'sin': fit['sin'],
-        'n_points': fit['n'], 'rmse_m': fit['rmse'], 'degenerate': fit['degenerate'],
+        'crs': 'EPSG:{}'.format(epsg), 'use_scale': use_scale, 'scale': fit['scale'],
+        'rotation_deg': fit['rotation_deg'], 'translation': {'x': fit['tx'], 'y': fit['ty']},
+        'cos': fit['cos'], 'sin': fit['sin'], 'n_points': fit['n'], 'rmse_m': fit['rmse'],
+        'degenerate': fit['degenerate'],
     }
+
+
+def _use_scale_from_request(request, state):
+    # Si el body no trae 'use_scale', se conserva el último valor persistido; si nunca hubo uno,
+    # el default es True (preserva el comportamiento con el que se creó el estado — FR-020, D9).
+    prev = ((state or {}).get('transform') or {}).get('use_scale', True)
+    return bool(request.data.get('use_scale', prev))
 
 
 def _points_with_residuals(points, fit):
@@ -144,14 +152,15 @@ class RealignState(TaskView):
         if err:
             return Response({'error': err}, status=status.HTTP_400_BAD_REQUEST)
 
-        fit = _fit_for_task(task, points)
         state = store.get_state(pk) or {}
+        use_scale = _use_scale_from_request(request, state)
+        fit = _fit_for_task(task, points, use_scale)
         # Editar puntos vuelve a estado de previsualización (los corregidos previos se
         # regenerarán desde el original al volver a aplicar — FR-010).
         state.update({
             'state': 'previewing',
             'points': _points_with_residuals(points, fit),
-            'transform': _transform_dict(fit, task.epsg or 4326),
+            'transform': _transform_dict(fit, task.epsg or 4326, use_scale),
             'products': available_products(task),
             'updated_at': _now(),
         })
@@ -176,16 +185,17 @@ class RealignApply(TaskView):
         points, err = _validate_points(request.data.get('points'))
         if err:
             return Response({'error': err}, status=status.HTTP_400_BAD_REQUEST)
+        state = store.get_state(pk) or {}
         if points is None or len(points) == 0:
-            state = store.get_state(pk)
-            points = state.get('points', []) if state else []
+            points = state.get('points', [])
 
         enabled = [p for p in points if p.get('enabled', True)]
         if len(enabled) < 1:
             return Response({'error': _('Se necesita al menos un par de puntos para aplicar.')},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        fit = _fit_for_task(task, points)
+        use_scale = _use_scale_from_request(request, state)
+        fit = _fit_for_task(task, points, use_scale)
         if fit['degenerate']:
             return Response({'error': _('Los puntos no permiten calcular la transformación (coincidentes o insuficientes).')},
                             status=status.HTTP_400_BAD_REQUEST)
@@ -199,11 +209,10 @@ class RealignApply(TaskView):
                         for t in products]
         T = {'scale': fit['scale'], 'cos': fit['cos'], 'sin': fit['sin'], 'tx': fit['tx'], 'ty': fit['ty']}
 
-        state = store.get_state(pk) or {}
         state.update({
             'state': 'applying',
             'points': _points_with_residuals(points, fit),
-            'transform': _transform_dict(fit, task.epsg or 4326),
+            'transform': _transform_dict(fit, task.epsg or 4326, use_scale),
             'products': products,
             'updated_at': _now(),
         })

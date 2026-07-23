@@ -45,6 +45,11 @@ En `http://localhost:8000`, abrir la vista 2D de la tarea:
 | 10 | US3-AS1/2 | Pulsar **Revertir** | Vista y productos vuelven al original; corregidos dejan de usarse |
 | 11 | US4-AS1/2 | Recargar la tarea / abrirla con otro usuario con acceso | Se recuperan puntos, errores y estado idénticos |
 | 12 | US1-AS6 / edge | Abrir una tarea **sin productos ráster 2D** | La herramienta no se activa e informa que no hay nada que realinear |
+| 13 | US5-AS1 | Con la herramienta activa y sin puntos, abrir el panel | El interruptor "Usar escala" aparece tildado por defecto |
+| 14 | US5-AS2 | Con 2+ pares marcados, destildar "Usar escala" | La transformación pasa a rígida (escala mostrada = 1.0000); residuos y RMSE se recalculan (< 1 s) |
+| 15 | US5-AS3 | Volver a tildar "Usar escala" | La transformación vuelve a similitud completa; residuos y RMSE se recalculan |
+| 16 | US5-AS4 | Con exactamente 1 par, alternar el interruptor | El resultado no cambia (solo traslación en ambos casos) |
+| 17 | US5-AS5/6 | Elegir un modo, **Aplicar**, recargar la tarea | Los corregidos usan el modo elegido; al recargar, el interruptor se recupera en el mismo estado |
 
 Descarga corregida: comprobar que `…/realign/download/orthophoto` entrega un GeoTIFF cuya
 georreferenciación coincide con la corrección (abrir en QGIS y verificar que cuadra).
@@ -66,6 +71,8 @@ Suite completa autocontenida (construye, corre y limpia):
 Cobertura mínima esperada:
 - **Paridad de similitud** JS↔Python sobre los mismos casos (traslación pura, similitud conocida,
   caso degenerado) — mismos parámetros y RMSE dentro de tolerancia.
+- **Paridad del modo rígido** (`use_scale=false`) JS↔Python sobre los mismos casos que el modo con
+  escala — mismos `cos`/`sin`/traslación/RMSE dentro de tolerancia, `scale=1.0` exacto.
 - **Pipeline GDAL** con un GeoTIFF pequeño de fixture: aplicar una similitud conocida y verificar
   que el COG corregido queda north-up y desplazado la cantidad esperada; el original no cambia.
 - **Persistencia**: guardar estado → recuperarlo idéntico; revertir limpia corregidos.
