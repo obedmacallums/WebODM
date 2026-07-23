@@ -1,0 +1,92 @@
+.leaflet-control-realign .realign-panel{
+  padding: 6px 10px 6px 6px;
+  background: #fff;
+  min-width: 260px;
+  max-width: 320px;
+
+  .close-button{
+    display: inline-block;
+    background-image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABIAAAASCAQAAAD8x0bcAAAAkUlEQVR4AZWRxQGDUBAFJ9pMflNIP/iVSkIb2wgccXd7g7O+3JXCQUgqBAfFSl8CMooJGQHfuUlEwZpoahZQ7ODTSXWJQkxyioock7BL2tXmdF4moJNX6IDZfbUBQNrX7qfeXfPuqwBAQjEz60w64htGJ+luFH48gt+NYe6v5b/cnr9asM+HlRQ2Qlwh2CjuqQQ9vKsKTwhQ1wAAAABJRU5ErkJggg==);
+    height: 18px;
+    width: 18px;
+    margin-right: 0;
+    float: right;
+    vertical-align: middle;
+    text-align: right;
+    margin-top: 0px;
+    margin-left: 16px;
+    position: relative;
+    left: 2px;
+
+    &:hover{
+      opacity: 0.7;
+      cursor: pointer;
+    }
+  }
+
+  .title{
+    font-size: 120%;
+    margin-right: 60px;
+  }
+
+  hr{
+    clear: both;
+    margin: 6px 0px;
+    border-color: #ddd;
+  }
+
+  *{
+    font-size: 12px;
+  }
+
+  .realign-help{
+    margin: 0 0 8px 0;
+    color: #444;
+  }
+
+  .action-buttons{
+    margin-bottom: 8px;
+  }
+
+  table.realign-points{
+    margin-bottom: 8px;
+
+    th, td{
+      padding: 2px 6px;
+    }
+
+    a{
+      color: #c0392b;
+    }
+  }
+
+  .realign-summary{
+    padding: 4px 0;
+    border-top: 1px solid #eee;
+
+    .realign-note{
+      color: #888;
+      margin-top: 4px;
+    }
+  }
+
+  .realign-caption{
+    color: #888;
+    margin: 6px 0 0 0;
+  }
+}
+
+// Marcadores de los pares de puntos de control.
+.realign-marker{
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 2px rgba(0,0,0,0.6);
+  box-sizing: border-box;
+}
+.realign-marker-source{ background: #e74c3c; }   // origen (ortofoto)
+.realign-marker-target{ background: #2ecc71; }    // destino (mapa base)
+
+// Wrapper de previsualización: no debe capturar eventos del mapa.
+.realign-preview-wrapper{
+  pointer-events: none;
+}
