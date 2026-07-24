@@ -1,4 +1,25 @@
+// Otros plugins (p.ej. viewshed) agregan su control topright después que
+// este en el DOM: sin un z-index propio en ESTE contenedor (no alcanza con
+// ponerlo en .realign-panel, que es un descendiente), pintan por encima del
+// panel abierto porque, a igualdad de z-index (auto), gana el orden del DOM.
+.leaflet-control-realign{
+  position: relative;
+  z-index: 1000;
+}
+
 .leaflet-control-realign .realign-panel{
+  // El botón que abre este panel puede quedar bastante abajo en la pila de
+  // controles topright (muchos plugins agregan el suyo antes que este). Con
+  // posición estática, un panel alto terminaba superpuesto con la barra de
+  // acciones del mapa (cámara/Share/3D, que además tiene z-index mayor). Fijo
+  // en viewport, anclado entre la navbar y esa barra, con su propio scroll.
+  position: fixed;
+  top: 108px;
+  right: 12px;
+  bottom: 84px;
+  overflow-y: auto;
+  z-index: 1000;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
   padding: 6px 10px 6px 6px;
   background: #fff;
   min-width: 260px;
@@ -48,15 +69,29 @@
     margin-bottom: 8px;
   }
 
-  table.realign-points{
+  .realign-points-wrapper{
+    max-height: 130px;
+    overflow-y: auto;
     margin-bottom: 8px;
+    border: 1px solid #eee;
 
-    th, td{
-      padding: 2px 6px;
-    }
+    table.realign-points{
+      margin-bottom: 0;
 
-    a{
-      color: #c0392b;
+      thead th{
+        position: sticky;
+        top: 0;
+        background: #fff;
+        box-shadow: 0 1px 0 #eee;
+      }
+
+      th, td{
+        padding: 2px 6px;
+      }
+
+      a{
+        color: #c0392b;
+      }
     }
   }
 
@@ -73,6 +108,26 @@
   .realign-caption{
     color: #888;
     margin: 6px 0 0 0;
+  }
+
+  .realign-pointcloud{
+    .realign-pointcloud-title{
+      margin-bottom: 4px;
+    }
+
+    .realign-note{
+      color: #888;
+    }
+
+    .realign-pointcloud-disclaimer{
+      margin-top: 6px;
+      font-style: italic;
+    }
+
+    .alert{
+      padding: 4px 8px;
+      margin: 4px 0;
+    }
   }
 }
 

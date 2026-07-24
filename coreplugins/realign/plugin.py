@@ -9,6 +9,8 @@ from .api import (
     RealignTiles,
     RealignTileJson,
     RealignDownload,
+    RealignPointCloud,
+    RealignPointCloudDownload,
 )
 
 
@@ -28,4 +30,6 @@ class Plugin(PluginBase):
             MountPoint('task/(?P<pk>[^/.]+)/realign/tiles/(?P<type>orthophoto|dsm|dtm)/(?P<z>\\d+)/(?P<x>\\d+)/(?P<y>\\d+)(?P<ext>\\.png)?', RealignTiles.as_view()),
             MountPoint('task/(?P<pk>[^/.]+)/realign/tilejson/(?P<type>orthophoto|dsm|dtm)', RealignTileJson.as_view()),
             MountPoint('task/(?P<pk>[^/.]+)/realign/download/(?P<type>orthophoto|dsm|dtm)', RealignDownload.as_view()),
+            MountPoint('task/(?P<pk>[^/.]+)/realign/pointcloud/download$', RealignPointCloudDownload.as_view()),
+            MountPoint('task/(?P<pk>[^/.]+)/realign/pointcloud$', RealignPointCloud.as_view()),
         ]

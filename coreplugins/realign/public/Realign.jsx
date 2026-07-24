@@ -54,6 +54,7 @@ export default L.Control.extend({
     onAdd: function (map) {
         var container = L.DomUtil.create('div', 'leaflet-control-realign leaflet-bar leaflet-control');
         L.DomEvent.disableClickPropagation(container);
+        L.DomEvent.disableScrollPropagation(container);
         ReactDOM.render(<RealignButton map={this.options.map} tasks={this.options.tasks} tiles={this.options.tiles} />, container);
 
         return container;

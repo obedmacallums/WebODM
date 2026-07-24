@@ -10,6 +10,22 @@ import { fitSimilarity, applySimilarity } from './similarity';
 const RASTER_TYPES = ['orthophoto', 'dsm', 'dtm'];
 const SEMI_OPACITY = 0.5;
 
+// Texto por causa de bloqueo de la corrección de nube (003-realign-pointcloud, US2, SC-009).
+const POINTCLOUD_REASON_TEXT = {
+  no_pointcloud: () => _("Esta tarea no tiene nube de puntos para corregir."),
+  not_applied: () => _("Aplica primero la realineación (no solo la previsualización) para poder generar la nube corregida."),
+  scale_enabled: () => _('La corrección de nube solo está disponible en modo rígido. Destilda "Usar escala", vuelve a Aplicar y repite la generación.'),
+  already_running: () => _("Ya hay una generación de nube en curso para esta tarea."),
+};
+
+function fmtBytes(n){
+  if (n === null || n === undefined || isNaN(n)) return "—";
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let v = n, i = 0;
+  while (v >= 1024 && i < units.length - 1){ v /= 1024; i++; }
+  return `${v.toFixed(1)} ${units[i]}`;
+}
+
 function layerMeta(layer){
   return layer[Symbol.for('meta')] || layer.meta || {};
 }
@@ -38,6 +54,8 @@ export default class RealignPanel extends React.Component {
         applied: false,
         busy: false,
         currentCeleryTaskId: null,
+        pointcloud: null,        // {status, stale, available, eligible, ineligible_reason, ...}
+        pointcloudProgress: null, // {status, progress} mientras status === 'running'
         task: props.tasks[0] || null
     };
 
@@ -63,7 +81,12 @@ export default class RealignPanel extends React.Component {
           this.setState({permanentError: _("Esta tarea no tiene productos ráster 2D (ortofoto, DSM o DTM) para realinear.")});
         }else{
           this.setState({products: res.products});
-          this.restoreState(res, () => { if (this.state.applied) this.showCorrected(); });
+          this.restoreState(res, () => {
+            if (this.state.applied) this.showCorrected();
+            // Reanudar el sondeo si había una generación de nube en curso al recargar (FR-011).
+            const pc = this.state.pointcloud;
+            if (pc && pc.status === 'running' && pc.celery_task_id) this.watchPointCloud(pc.celery_task_id);
+          });
         }
       })
       .fail(() => this.setState({permanentError: _("No se pudo obtener el estado de la tarea. ¿Estás conectado a internet?")}))
@@ -106,15 +129,16 @@ export default class RealignPanel extends React.Component {
     // Estados persistidos antes de esta capacidad no tienen use_scale: se interpretan como true
     // (preserva el comportamiento con el que se crearon — FR-020, D9).
     const useScale = (res.transform && typeof res.transform.use_scale === 'boolean') ? res.transform.use_scale : true;
+    const pointcloud = res.pointcloud || null;
     if (Array.isArray(res.points) && res.points.length){
       const points = res.points.map(p => ({
         id: (typeof p.id === 'number' ? p.id : this._nextId++),
         source: p.source, target: p.target, residual: p.residual_m
       }));
       this._nextId = Math.max(this._nextId, ...points.map(p => p.id)) + 1;
-      this.setState({points, applied, useScale}, cb);
+      this.setState({points, applied, useScale, pointcloud}, cb);
     }else{
-      this.setState({applied, useScale}, cb);
+      this.setState({applied, useScale, pointcloud}, cb);
     }
   }
 
@@ -357,6 +381,10 @@ export default class RealignPanel extends React.Component {
     return $.ajax({type: 'PUT', url: `${this.apiBase()}/state`,
                    data: JSON.stringify({points: this.serializePoints(), use_scale: this.state.useScale}),
                    contentType: 'application/json'})
+            // Editar puntos o el modo de escala vuelve la realineación a 'previsualización':
+            // el servidor ya recalcula `pointcloud.eligible`/`stale` en la misma respuesta
+            // (deja de ofrecerse una nube generada con un ajuste que ya no es el vigente — FR-012).
+            .done(res => { if (res.pointcloud) this.setState({pointcloud: res.pointcloud}); })
             .fail(() => {});
   }
 
@@ -374,7 +402,14 @@ export default class RealignPanel extends React.Component {
           Workers.waitForCompletion(res.celery_task_id, error => {
             if (token !== this._applyToken) return; // revert/editar mientras corría → ignorar
             if (error){ this.setState({busy: false, error, currentCeleryTaskId: null}); }
-            else { this.setState({busy: false, applied: true, currentCeleryTaskId: null}, this.showCorrected); }
+            else {
+              this.setState({busy: false, applied: true, currentCeleryTaskId: null}, () => {
+                this.showCorrected();
+                // Aplicar cambia state -> 'applied', una de las condiciones de elegibilidad
+                // de la nube de puntos (FR-005) — refrescar para reflejarlo.
+                this.refreshPointCloudState();
+              });
+            }
           });
         }else{
           this.setState({busy: false, error: res.error || _("Respuesta inválida del servidor.")});
@@ -394,9 +429,49 @@ export default class RealignPanel extends React.Component {
         this.setState({busy: false, applied: false, currentCeleryTaskId: null}, () => {
           this.setSemiTransparency(true);
           this.recompute();
+          // Revertir descarta también la nube corregida en el servidor (FR-013) — refrescar.
+          this.refreshPointCloudState();
         });
       })
       .fail(xhr => this.setState({busy: false, error: this.errFromXhr(xhr)}));
+  }
+
+  // --- Nube de puntos corregida (003-realign-pointcloud) --------------------
+
+  refreshPointCloudState = () => {
+    return $.getJSON(`${this.apiBase()}/state`)
+      .done(res => this.setState({pointcloud: res.pointcloud || null}));
+  }
+
+  watchPointCloud = (celeryTaskId) => {
+    this.setState({pointcloudProgress: null});
+    // Se ignora el mensaje de error puntual del sondeo: el estado autoritativo (incluida la
+    // causa de un fallo o cancelación) vive en el store del servidor (FR-014) y se recupera
+    // siempre con un GET state fresco, en vez de confiar en el resultado transitorio de Celery.
+    Workers.waitForCompletion(celeryTaskId, () => this.refreshPointCloudState(),
+      (statusText, progress) => this.setState({pointcloudProgress: {status: statusText, progress}}));
+  }
+
+  handleGeneratePointCloud = () => {
+    const pc = this.state.pointcloud;
+    if (!pc || !pc.eligible) return;
+    this.setState({pointcloud: {...pc, status: 'running', error: null}, pointcloudProgress: null});
+    $.ajax({type: 'POST', url: `${this.apiBase()}/pointcloud`})
+      .done(res => {
+        if (res.celery_task_id){
+          this.setState({pointcloud: {...this.state.pointcloud, status: 'running', celery_task_id: res.celery_task_id}});
+          this.watchPointCloud(res.celery_task_id);
+        }else{
+          this.refreshPointCloudState();
+        }
+      })
+      .fail(xhr => this.setState({pointcloud: {...this.state.pointcloud, status: 'error', error: this.errFromXhr(xhr)}}));
+  }
+
+  handleDiscardPointCloud = () => {
+    $.ajax({type: 'DELETE', url: `${this.apiBase()}/pointcloud`})
+      .done(() => this.refreshPointCloudState())
+      .fail(() => this.refreshPointCloudState());
   }
 
   errFromXhr = (xhr) => {
@@ -405,6 +480,72 @@ export default class RealignPanel extends React.Component {
   }
 
   fmt = (v, digits = 2) => (v === null || v === undefined || isNaN(v)) ? "—" : Number(v).toFixed(digits);
+
+  // --- Sección de nube de puntos (003-realign-pointcloud) -------------------
+
+  renderPointCloudSection = () => {
+    const { pointcloud, pointcloudProgress } = this.state;
+    if (!pointcloud) return "";
+
+    // FR-017: la tarea nunca va a tener nube en esta sesión — nota compacta, sin acción.
+    if (pointcloud.status === 'absent' && pointcloud.ineligible_reason === 'no_pointcloud'){
+      return (<div className="realign-pointcloud">
+        <hr/>
+        <div className="realign-note">{POINTCLOUD_REASON_TEXT.no_pointcloud()}</div>
+      </div>);
+    }
+
+    let body;
+    if (pointcloud.status === 'running'){
+      const pct = pointcloudProgress ? Math.round(pointcloudProgress.progress) : null;
+      body = (<div>
+        <i className="fa fa-circle-notch fa-spin" />{" "}
+        {(pointcloudProgress && pointcloudProgress.status) || _("Generando la nube corregida…")}
+        {pct !== null ? ` (${pct}%)` : ""}
+        {" — "}
+        <a href="javascript:void(0);" onClick={this.handleDiscardPointCloud}>{_("Cancelar")}</a>
+      </div>);
+    }else if (pointcloud.status === 'ready' && pointcloud.available){
+      body = (<div>
+        <div>
+          {_("Nube corregida lista")} ({fmtBytes(pointcloud.size_bytes)}
+          {pointcloud.point_count ? `, ${pointcloud.point_count} ${_("puntos")}` : ""})
+        </div>
+        <a className="btn btn-sm btn-default" href={`${this.apiBase()}/pointcloud/download`}>
+          <i className="fa fa-download" /> {_("Descargar nube corregida (.laz)")}
+        </a>
+        {" "}
+        <a href="javascript:void(0);" onClick={this.handleDiscardPointCloud}>{_("Descartar")}</a>
+      </div>);
+    }else if (pointcloud.status === 'ready' && pointcloud.stale){
+      body = (<div className="alert alert-warning">
+        {_("El ajuste cambió desde que se generó esta nube: ya no corresponde a la corrección vigente.")}
+        {pointcloud.eligible ?
+          <div><a href="javascript:void(0);" onClick={this.handleGeneratePointCloud}>{_("Volver a generar")}</a></div> : ""}
+      </div>);
+    }else if (pointcloud.status === 'error'){
+      body = (<div className="alert alert-warning">
+        {pointcloud.error || _("No se pudo generar la nube corregida.")}
+        {pointcloud.eligible ?
+          <div><a href="javascript:void(0);" onClick={this.handleGeneratePointCloud}>{_("Reintentar")}</a></div> : ""}
+      </div>);
+    }else if (pointcloud.eligible){
+      body = (<button type="button" className="btn btn-sm btn-default" onClick={this.handleGeneratePointCloud}>
+        <i className="fa fa-cube" /> {_("Generar nube de puntos corregida")}
+      </button>);
+    }else{
+      body = (<div className="realign-note">{(POINTCLOUD_REASON_TEXT[pointcloud.ineligible_reason] || (() => ""))()}</div>);
+    }
+
+    return (<div className="realign-pointcloud">
+      <hr/>
+      <div className="realign-pointcloud-title"><strong>{_("Nube de puntos")}</strong></div>
+      {body}
+      <div className="realign-note realign-pointcloud-disclaimer">
+        {_("La corrección de nube solo afecta al archivo descargable; el visor 3D sigue mostrando la nube original.")}
+      </div>
+    </div>);
+  }
 
   render(){
     const { checkingAvailability, permanentError, products, points, transform, useScale, captureMode, applied, busy } = this.state;
@@ -444,20 +585,22 @@ export default class RealignPanel extends React.Component {
         </div>
 
         {points.length > 0 ?
-          <table className="table table-condensed realign-points">
-            <thead><tr><th>#</th><th className="text-right">{_("Error (m)")}</th><th></th></tr></thead>
-            <tbody>
-              {points.map((p, i) => (
-                <tr key={p.id}>
-                  <td>{i + 1}</td>
-                  <td className="text-right">{this.fmt(p.residual)}</td>
-                  <td className="text-right">
-                    <a href="javascript:void(0);" title={_("Eliminar")} onClick={() => this.handleRemovePoint(p.id)}><i className="fa fa-times" /></a>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table> : ""}
+          <div className="realign-points-wrapper">
+            <table className="table table-condensed realign-points">
+              <thead><tr><th>#</th><th className="text-right">{_("Error (m)")}</th><th></th></tr></thead>
+              <tbody>
+                {points.map((p, i) => (
+                  <tr key={p.id}>
+                    <td>{i + 1}</td>
+                    <td className="text-right">{this.fmt(p.residual)}</td>
+                    <td className="text-right">
+                      <a href="javascript:void(0);" title={_("Eliminar")} onClick={() => this.handleRemovePoint(p.id)}><i className="fa fa-times" /></a>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div> : ""}
 
         <div className="row realign-scale-toggle">
           <div className="col-sm-12">
@@ -502,6 +645,8 @@ export default class RealignPanel extends React.Component {
               </button>}
           </div>
         </div>
+
+        {this.renderPointCloudSection()}
       </div>);
     }
 

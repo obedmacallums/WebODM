@@ -11,7 +11,7 @@ from app.plugins.worker import run_function_async
 from app.plugins.functions import get_plugins_persistent_path
 from app.api.common import check_project_perms
 
-from . import transform, store, corrections
+from . import transform, store, corrections, pointcloud
 
 
 # Productos ráster 2D que el plugin puede realinear (comparten georreferenciación).
@@ -123,6 +123,7 @@ def _state_response(task, pk):
         return {
             'state': 'previewing', 'points': [], 'transform': None,
             'products': products, 'corrected_available': False,
+            'pointcloud': _pointcloud_state_response(task, pk),
         }
     corrected = state.get('corrected_paths') or {}
     corrected_available = (state.get('state') == 'applied'
@@ -134,6 +135,7 @@ def _state_response(task, pk):
         'products': products,
         'corrected_available': corrected_available,
         'updated_at': state.get('updated_at'),
+        'pointcloud': _pointcloud_state_response(task, pk),
     }
 
 
@@ -171,6 +173,7 @@ class RealignState(TaskView):
         task = self.get_and_check_task(request, pk)
         check_project_perms(request, task.project, ('change_project',))
         _remove_corrected(pk)
+        _discard_pointcloud(pk)
         store.del_state(pk)
         return Response({'ok': True}, status=status.HTTP_200_OK)
 
@@ -232,6 +235,7 @@ class RealignRevert(TaskView):
         task = self.get_and_check_task(request, pk)
         check_project_perms(request, task.project, ('change_project',))
         _remove_corrected(pk)
+        _discard_pointcloud(pk)
         state = store.get_state(pk) or {}
         state.update({'state': 'reverted', 'corrected_paths': {}, 'updated_at': _now()})
         store.set_state(pk, state)
@@ -349,3 +353,193 @@ class RealignDownload(TaskView):
             raise exceptions.NotFound()
         return download_file_response(request, path, 'attachment',
                                       download_filename='{}_realigned.tif'.format(type))
+
+
+# --- Nube de puntos (003-realign-pointcloud) --------------------------------------------------
+
+POINTCLOUD_ASSET = 'georeferenced_model.laz'
+
+POINTCLOUD_REASON_MESSAGES = {
+    'no_pointcloud': _('La tarea no tiene nube de puntos.'),
+    'not_applied': _('Aplica primero la realineación (no solo la previsualización) antes de generar la nube corregida.'),
+    'scale_enabled': _('La corrección de nube solo está disponible en modo rígido. Destilda "Usar escala", vuelve a aplicar la realineación y repite la generación.'),
+    'already_running': _('Ya hay una generación de nube en curso para esta tarea.'),
+}
+
+
+def _pointcloud_files(pk):
+    d = _out_dir(pk)
+    return [os.path.join(d, name) for name in
+            ('pointcloud.laz', 'pointcloud.tmp.laz', 'pointcloud_pipeline.json')]
+
+
+def _remove_pointcloud_files(pk):
+    for p in _pointcloud_files(pk):
+        if os.path.isfile(p):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+def _abort_celery_task(celery_task_id):
+    from worker.tasks import TestSafeAsyncResult
+    res = TestSafeAsyncResult(celery_task_id)
+    if not res.ready():
+        res.backend.store_result(celery_task_id, result=None, state="ABORTED", traceback=None)
+
+
+def _discard_pointcloud(pk):
+    """Cancela una generación en curso (si la hay), borra los archivos y el estado (FR-013, FR-015)."""
+    pc = store.get_pointcloud_state(pk)
+    if pc and pc.get('status') == 'running' and pc.get('celery_task_id'):
+        _abort_celery_task(pc['celery_task_id'])
+    _remove_pointcloud_files(pk)
+    store.del_pointcloud_state(pk)
+
+
+def _pointcloud_eligibility(task, pk):
+    """Las tres condiciones de elegibilidad (D9 de research.md) más la exclusión mutua de una
+    segunda generación simultánea. Se revalida siempre en el backend (FR-004, FR-005, FR-015,
+    FR-017), sin confiar en que la UI ya las haya comprobado.
+    """
+    if POINTCLOUD_ASSET not in (task.available_assets or []):
+        return False, 'no_pointcloud'
+
+    state = store.get_state(pk) or {}
+    if state.get('state') != 'applied':
+        return False, 'not_applied'
+
+    transform_ = state.get('transform') or {}
+    if transform_.get('use_scale', True):
+        return False, 'scale_enabled'
+
+    pc = store.get_pointcloud_state(pk)
+    if pc and pc.get('status') == 'running':
+        return False, 'already_running'
+
+    return True, None
+
+
+def _flat_transform(stored_transform):
+    """Convierte el `transform` persistido (forma de `_transform_dict`, con `translation:
+    {x,y}` anidado) a la forma plana (`cos`/`sin`/`tx`/`ty`) que usan `pointcloud.py` y
+    `corrections.py` (mismo `T` que `RealignApply.post` arma a partir de `fit`, no del
+    documento persistido)."""
+    t = stored_transform or {}
+    translation = t.get('translation') or {}
+    return {
+        'cos': t.get('cos', 1.0),
+        'sin': t.get('sin', 0.0),
+        'tx': translation.get('x', 0.0),
+        'ty': translation.get('y', 0.0),
+        'use_scale': t.get('use_scale', True),
+        'n_points': t.get('n_points'),
+    }
+
+
+def _pointcloud_state_response(task, pk):
+    pc = store.get_pointcloud_state(pk)
+    state = store.get_state(pk) or {}
+    current_transform = state.get('transform') or {}
+
+    if pc is None:
+        pc_status, stale, available = 'absent', False, False
+        point_count = size_bytes = generated_at = error = celery_task_id = None
+    else:
+        pc_status = pc.get('status', 'absent')
+        current_fp = pointcloud.compute_fingerprint(_flat_transform(current_transform)) if current_transform else None
+        stale = (pc_status == 'ready') and not pointcloud.fingerprint_matches(pc.get('fingerprint'), current_fp)
+        available = (pc_status == 'ready') and not stale
+        point_count = pc.get('point_count')
+        size_bytes = pc.get('size_bytes')
+        generated_at = pc.get('generated_at')
+        error = pc.get('error')
+        celery_task_id = pc.get('celery_task_id')
+
+    eligible, reason = _pointcloud_eligibility(task, pk)
+    return {
+        'status': pc_status,
+        'stale': stale,
+        'available': available,
+        'point_count': point_count,
+        'size_bytes': size_bytes,
+        'generated_at': generated_at,
+        'celery_task_id': celery_task_id,
+        'error': error,
+        'eligible': eligible,
+        'ineligible_reason': reason,
+    }
+
+
+class RealignPointCloud(TaskView):
+    """Generar / descartar la nube de puntos corregida (FR-001 a FR-007, FR-009, FR-013 a FR-017)."""
+
+    def post(self, request, pk=None):
+        task = self.get_and_check_task(request, pk)
+        check_project_perms(request, task.project, ('change_project',))
+
+        eligible, reason = _pointcloud_eligibility(task, pk)
+        if not eligible:
+            return Response({'error': POINTCLOUD_REASON_MESSAGES[reason], 'reason': reason},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        state = store.get_state(pk) or {}
+        transform_ = _flat_transform(state.get('transform'))
+        src_path = os.path.abspath(task.get_asset_download_path(POINTCLOUD_ASSET))
+        out_dir = _out_dir(pk)
+
+        pc_state = {
+            'status': 'running', 'path': None, 'fingerprint': None, 'celery_task_id': None,
+            'point_count': None, 'size_bytes': None, 'source_size_bytes': None, 'error': None,
+            'generated_at': None, 'generated_by': None, 'updated_at': _now(),
+        }
+        store.set_pointcloud_state(pk, pc_state)
+
+        async_result = run_function_async(
+            pointcloud.run_pointcloud_correction,
+            str(pk), src_path, out_dir, transform_, request.user.id,
+            with_progress=True, with_cancel=True,
+        )
+        # `run_function_async` corre síncrono bajo CELERY_TASK_ALWAYS_EAGER=True (tests):
+        # para cuando volvemos aquí, `run_pointcloud_correction` ya pudo haber terminado y
+        # escrito su propio estado final ('ready'/'error'). Solo adjuntamos el celery_task_id
+        # si el estado sigue siendo el 'running' que dejamos antes de lanzar el async —de lo
+        # contrario pisaríamos el resultado ya persistido con datos obsoletos.
+        current = store.get_pointcloud_state(pk)
+        if current is not None and current.get('status') == 'running' and current.get('celery_task_id') is None:
+            current['celery_task_id'] = async_result.task_id
+            store.set_pointcloud_state(pk, current)
+
+        return Response({'celery_task_id': async_result.task_id, 'status': 'running'},
+                        status=status.HTTP_200_OK)
+
+    def delete(self, request, pk=None):
+        task = self.get_and_check_task(request, pk)
+        check_project_perms(request, task.project, ('change_project',))
+        _discard_pointcloud(pk)
+        return Response({'status': 'absent'}, status=status.HTTP_200_OK)
+
+
+class RealignPointCloudDownload(TaskView):
+    """Descarga del LAZ corregido desde el directorio persistente del plugin (D5, FR-010, FR-011)."""
+
+    def get(self, request, pk=None):
+        from app.api.tasks import download_file_response
+        task = self.get_and_check_task(request, pk)
+
+        pc = store.get_pointcloud_state(pk)
+        if pc is None or pc.get('status') != 'ready':
+            raise exceptions.NotFound()
+
+        state = store.get_state(pk) or {}
+        current_fp = pointcloud.compute_fingerprint(_flat_transform(state.get('transform')))
+        if not pointcloud.fingerprint_matches(pc.get('fingerprint'), current_fp):
+            raise exceptions.NotFound()
+
+        path = pc.get('path')
+        if not path or not os.path.isfile(path):
+            raise exceptions.NotFound()
+
+        return download_file_response(request, path, 'attachment',
+                                      download_filename='{}_realigned.laz'.format(task.name or pk))

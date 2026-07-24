@@ -13,9 +13,10 @@ from app.models import Project, Task
 from app.tests.classes import BootTestCase
 from nodeodm import status_codes
 
-from . import transform, corrections
+from . import transform, corrections, pointcloud, store
 
 TEST_EXTENT = Polygon.from_bbox([-82.8325, 27.9578, -82.8310, 27.9593])
+POINTCLOUD_ASSET_KEY = 'georeferenced_model.laz'
 # Pares de puntos de control de ejemplo (cerca de Tampa, UTM 17N / EPSG:32617).
 POINTS_OK = [
     {'id': 1, 'source': {'lat': 27.9580, 'lng': -82.8320}, 'target': {'lat': 27.9581, 'lng': -82.8319}, 'enabled': True},
@@ -381,6 +382,419 @@ def _make_synthetic_raster(path, bands=1):
         ds.GetRasterBand(b).WriteArray(np.full((size, size), 128, dtype=np.uint8))
     ds.FlushCache()
     ds = None
+
+
+def _make_synthetic_pointcloud(path, count=500,
+                                bounds=((500000.0, 500050.0), (5000000.0, 5000050.0), (100.0, 110.0)),
+                                scale=0.001, epsg=32633):
+    """Genera un LAZ sintético con `pdal`/`readers.faux` (research.md D10) — sin binarios
+    versionados en el repo."""
+    import json
+    import subprocess
+
+    bx, by, bz = bounds
+    pipeline = {
+        "pipeline": [
+            {"type": "readers.faux", "mode": "random", "count": count,
+             "bounds": "([{},{}],[{},{}],[{},{}])".format(bx[0], bx[1], by[0], by[1], bz[0], bz[1])},
+            {"type": "writers.las", "filename": path, "compression": "LASZIP",
+             "a_srs": "EPSG:{}".format(epsg),
+             "scale_x": scale, "scale_y": scale, "scale_z": scale,
+             "offset_x": (bx[0] + bx[1]) / 2, "offset_y": (by[0] + by[1]) / 2, "offset_z": (bz[0] + bz[1]) / 2},
+        ]
+    }
+    pipeline_path = path + ".pipeline.json"
+    with open(pipeline_path, 'w') as f:
+        json.dump(pipeline, f)
+    try:
+        subprocess.run(['pdal', 'pipeline', pipeline_path], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    finally:
+        if os.path.isfile(pipeline_path):
+            os.remove(pipeline_path)
+
+
+def _export_xyz(las_path):
+    """Exporta X,Y,Z con precisión completa (no la del JSON de `pdal info`) para comparar
+    resultados punto a punto en los tests (D2/D3)."""
+    import csv
+    import json
+    import subprocess
+
+    csv_path = las_path + ".xyz.csv"
+    pipeline = {"pipeline": [
+        {"type": "readers.las", "filename": las_path},
+        {"type": "writers.text", "filename": csv_path, "order": "X,Y,Z",
+         "keep_unspecified": "false", "precision": 9},
+    ]}
+    pipeline_path = csv_path + ".json"
+    with open(pipeline_path, 'w') as f:
+        json.dump(pipeline, f)
+    try:
+        subprocess.run(['pdal', 'pipeline', pipeline_path], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        with open(csv_path) as f:
+            rows = [(float(r['X']), float(r['Y']), float(r['Z'])) for r in csv.DictReader(f)]
+    finally:
+        for p in (pipeline_path, csv_path):
+            if os.path.isfile(p):
+                os.remove(p)
+    return rows
+
+
+class RealignPointCloudMathTest(unittest.TestCase):
+    """Matriz, offsets seguros y huella de la transformación (T009, research.md D2/D3/D8)."""
+
+    def test_build_transformation_matrix_z_identity_and_ignores_scale(self):
+        T = {'cos': 0.8660254037844387, 'sin': 0.5, 'tx': 10.0, 'ty': -5.0, 'scale': 2.0}
+        values = [float(v) for v in pointcloud.build_transformation_matrix(T).split()]
+        self.assertEqual(len(values), 16)
+        self.assertEqual(values[8:12], [0.0, 0.0, 1.0, 0.0])   # fila Z: identidad (D2, FR-003)
+        self.assertEqual(values[12:16], [0.0, 0.0, 0.0, 1.0])  # fila homogénea
+        self.assertAlmostEqual(values[0], T['cos'])
+        self.assertAlmostEqual(values[1], -T['sin'])
+        self.assertAlmostEqual(values[3], T['tx'])
+        self.assertAlmostEqual(values[4], T['sin'])
+        self.assertAlmostEqual(values[5], T['cos'])
+        self.assertAlmostEqual(values[7], T['ty'])
+
+    def test_compute_safe_offsets_centers_on_transformed_bbox(self):
+        bounds = {'minx': 0.0, 'maxx': 100.0, 'miny': 0.0, 'maxy': 100.0}
+        T = {'cos': 1.0, 'sin': 0.0, 'tx': 1000.0, 'ty': -1000.0}
+        ox, oy = pointcloud.compute_safe_offsets(bounds, T, 0.001, 0.001)
+        # Sin rotación, las 4 esquinas transformadas caen en [1000,1100]x[-1000,-900];
+        # el centro esperado es (1050, -950), no el offset original heredado (D3).
+        self.assertEqual(ox, 1050)
+        self.assertEqual(oy, -950)
+
+    def test_compute_safe_offsets_rejects_int32_overflow(self):
+        # bbox de 600 km de ancho con precisión de 0.1 mm: ni el offset óptimo (centrado)
+        # evita que las esquinas excedan el rango representable por un int32 (D3).
+        bounds = {'minx': 0.0, 'maxx': 600000.0, 'miny': 0.0, 'maxy': 10.0}
+        T = {'cos': 1.0, 'sin': 0.0, 'tx': 0.0, 'ty': 0.0}
+        with self.assertRaises(pointcloud.PointCloudTransformError):
+            pointcloud.compute_safe_offsets(bounds, T, 0.0001, 0.0001)
+
+    def test_fingerprint_matches_identical_transform(self):
+        T = {'cos': 0.999, 'sin': 0.01, 'tx': 100.1234, 'ty': -50.5678, 'use_scale': False, 'n_points': 3}
+        self.assertTrue(pointcloud.fingerprint_matches(
+            pointcloud.compute_fingerprint(T), pointcloud.compute_fingerprint(dict(T))))
+
+    def test_fingerprint_mismatch_on_translation_change(self):
+        T1 = {'cos': 0.999, 'sin': 0.01, 'tx': 100.0, 'ty': -50.0, 'use_scale': False, 'n_points': 3}
+        T2 = dict(T1, tx=105.0)
+        self.assertFalse(pointcloud.fingerprint_matches(
+            pointcloud.compute_fingerprint(T1), pointcloud.compute_fingerprint(T2)))
+
+    def test_fingerprint_mismatch_on_scale_mode_change(self):
+        """Reaplicar con escala habilitada invalida una nube generada en modo rígido (US2-AS3)."""
+        T1 = {'cos': 1.0, 'sin': 0.0, 'tx': 0.0, 'ty': 0.0, 'use_scale': False, 'n_points': 2}
+        T2 = dict(T1, use_scale=True)
+        self.assertFalse(pointcloud.fingerprint_matches(
+            pointcloud.compute_fingerprint(T1), pointcloud.compute_fingerprint(T2)))
+
+    def test_fingerprint_none_never_matches(self):
+        self.assertFalse(pointcloud.fingerprint_matches(None, {'cos': 1.0}))
+        self.assertFalse(pointcloud.fingerprint_matches({'cos': 1.0}, None))
+
+
+class RealignPointCloudPipelineTest(unittest.TestCase):
+    """Pipeline PDAL end-to-end sobre un LAZ sintético (T010, research.md D2/D3/D4/D8)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="realign_pc_")
+        self.src = os.path.join(self.tmp, "georeferenced_model.laz")
+        _make_synthetic_pointcloud(self.src)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_correction_preserves_point_count_z_and_header(self):
+        out_dir = os.path.join(self.tmp, "out")
+        T = {'cos': 0.9998476951563913, 'sin': 0.01745240643728351, 'tx': 12.3, 'ty': -7.8,
+             'use_scale': False, 'n_points': 3}
+
+        orig_summary = pointcloud.read_las_summary(self.src)
+        orig_meta = pointcloud.read_las_metadata(self.src)
+
+        result = pointcloud.run_pointcloud_correction("test-task-pc1", self.src, out_dir, T)
+        self.assertEqual(result.get('status'), 'ready', result)
+
+        out_path = os.path.join(out_dir, 'pointcloud.laz')
+        self.assertTrue(os.path.isfile(out_path))
+        self.assertFalse(os.path.isfile(os.path.join(out_dir, 'pointcloud.tmp.laz')))
+
+        new_summary = pointcloud.read_las_summary(out_path)
+        new_meta = pointcloud.read_las_metadata(out_path)
+
+        self.assertEqual(new_summary['num_points'], orig_summary['num_points'])
+        # Cabecera preservada: escala/offset_z/formato/versión/SRS (D3, FR-008).
+        self.assertEqual(new_meta['scale_x'], orig_meta['scale_x'])
+        self.assertEqual(new_meta['scale_y'], orig_meta['scale_y'])
+        self.assertEqual(new_meta['scale_z'], orig_meta['scale_z'])
+        self.assertEqual(new_meta['offset_z'], orig_meta['offset_z'])
+        self.assertEqual(new_meta['dataformat_id'], orig_meta['dataformat_id'])
+        self.assertEqual(new_meta['minor_version'], orig_meta['minor_version'])
+        self.assertIn('32633', new_meta.get('spatialreference', ''))
+
+        # Z intacta y XY coherente con lo esperado, punto a punto — no basta con comparar
+        # bounds de `pdal info --summary`, que redondea la salida JSON con precisión variable
+        # (mismo valor real puede imprimirse con distinta cantidad de decimales). Se exporta a
+        # texto con precisión completa y se compara cada punto (D2/D3, FR-003, SC-002).
+        src_rows = _export_xyz(self.src)
+        out_rows = _export_xyz(out_path)
+        self.assertEqual(len(src_rows), len(out_rows))
+        cos, sin, tx, ty = T['cos'], T['sin'], T['tx'], T['ty']
+        max_dz = 0.0
+        max_dxy = 0.0
+        for (sx, sy, sz), (ox, oy, oz) in zip(src_rows, out_rows):
+            max_dz = max(max_dz, abs(sz - oz))
+            ex = cos * sx - sin * sy + tx
+            ey = sin * sx + cos * sy + ty
+            max_dxy = max(max_dxy, abs(ex - ox), abs(ey - oy))
+        self.assertEqual(max_dz, 0.0)
+        self.assertLess(max_dxy, orig_meta['scale_x'])  # dentro de un paso de cuantización
+
+        state = store.get_pointcloud_state("test-task-pc1")
+        self.assertEqual(state['status'], 'ready')
+        self.assertEqual(state['point_count'], orig_summary['num_points'])
+        self.assertIsNotNone(state['fingerprint'])
+
+    def test_cancellation_before_launch_reports_canceled_without_files(self):
+        out_dir = os.path.join(self.tmp, "out_cancel")
+        T = {'cos': 1.0, 'sin': 0.0, 'tx': 0.0, 'ty': 0.0, 'use_scale': False, 'n_points': 1}
+        result = pointcloud.run_pointcloud_correction(
+            "test-task-cancel", self.src, out_dir, T, should_cancel=lambda: True)
+        self.assertEqual(result.get('error'), 'canceled')
+        self.assertFalse(os.path.isfile(os.path.join(out_dir, 'pointcloud.tmp.laz')))
+        self.assertFalse(os.path.isfile(os.path.join(out_dir, 'pointcloud.laz')))
+
+    def test_self_contained_under_eval_async(self):
+        """Mismo patrón que corrections.py: el worker reejecuta el source en un namespace
+        vacío (app/plugins/worker.py: eval_async) — sin imports relativos ni globals del
+        módulo (regresión del bug de 'apply')."""
+        import inspect
+        source = inspect.getsource(pointcloud.run_pointcloud_correction)
+        ns = {}
+        exec(compile(source, 'file', 'exec'), ns, ns)
+        out_dir = os.path.join(self.tmp, "out_eval")
+        T = {'cos': 1.0, 'sin': 0.0, 'tx': 0.0, 'ty': 0.0, 'use_scale': False, 'n_points': 1}
+        result = ns['run_pointcloud_correction']("eval-pc-task", self.src, out_dir, T)
+        self.assertEqual(result.get('status'), 'ready')
+        self.assertTrue(os.path.isfile(os.path.join(out_dir, 'pointcloud.laz')))
+
+
+class RealignPointCloudApiTest(BootTestCase):
+    """Contrato de la API de nube de puntos (T011, T017, T018, T023-T025)."""
+
+    def setUp(self):
+        super().setUp()
+        self.client = APIClient()
+
+    def _project(self, name="Realign pointcloud API test project"):
+        owner = User.objects.get(username="testuser")
+        return Project.objects.create(owner=owner, name=name)
+
+    def _task(self, project, **kwargs):
+        defaults = dict(project=project, status=status_codes.COMPLETED,
+                        available_assets=["orthophoto.tif", POINTCLOUD_ASSET_KEY],
+                        orthophoto_extent=TEST_EXTENT, epsg=32617)
+        defaults.update(kwargs)
+        return Task.objects.create(**defaults)
+
+    def _url(self, task, suffix="pointcloud"):
+        return "/api/plugins/realign/task/{}/realign/{}".format(task.id, suffix)
+
+    def _seed_assets(self, task):
+        ortho_path = task.get_asset_download_path('orthophoto.tif')
+        os.makedirs(os.path.dirname(ortho_path), exist_ok=True)
+        _make_synthetic_raster(ortho_path)
+        laz_path = task.get_asset_download_path(POINTCLOUD_ASSET_KEY)
+        os.makedirs(os.path.dirname(laz_path), exist_ok=True)
+        _make_synthetic_pointcloud(laz_path)
+        self.addCleanup(shutil.rmtree, task.task_path(), ignore_errors=True)
+
+    def _apply(self, task, use_scale):
+        self.client.login(username="testuser", password="test1234")
+        res = self.client.post("/api/plugins/realign/task/{}/realign/apply".format(task.id),
+                               {'points': POINTS_OK, 'use_scale': use_scale}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.content)
+        # CELERY_TASK_ALWAYS_EAGER=True en tests (webodm/settings.py): la corrección de
+        # rásteres ya corrió de forma síncrona dentro del POST anterior.
+        state = self.client.get("/api/plugins/realign/task/{}/realign/state".format(task.id))
+        self.assertEqual(state.data['state'], 'applied', state.data)
+
+    # --- T017: las cuatro causas de inelegibilidad ---------------------------
+
+    def test_post_pointcloud_rejects_task_without_pointcloud_asset(self):
+        task = self._task(self._project(), available_assets=["orthophoto.tif"])
+        self._seed_assets(task)  # solo para tener orthophoto real; el asset de nube no está declarado
+        self._apply(task, use_scale=False)
+        res = self.client.post(self._url(task))
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data['reason'], 'no_pointcloud')
+
+    def test_post_pointcloud_rejects_when_not_applied(self):
+        task = self._task(self._project())
+        self._seed_assets(task)
+        self.client.login(username="testuser", password="test1234")
+        res = self.client.post(self._url(task))
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data['reason'], 'not_applied')
+
+    def test_post_pointcloud_rejects_when_scale_enabled(self):
+        task = self._task(self._project())
+        self._seed_assets(task)
+        self._apply(task, use_scale=True)
+        res = self.client.post(self._url(task))
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data['reason'], 'scale_enabled')
+
+    def test_post_pointcloud_rejects_when_already_running(self):
+        task = self._task(self._project())
+        self._seed_assets(task)
+        self._apply(task, use_scale=False)
+        store.set_pointcloud_state(task.id, {'status': 'running', 'celery_task_id': 'fake-id'})
+        res = self.client.post(self._url(task))
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data['reason'], 'already_running')
+
+    # --- T011: happy path ------------------------------------------------------
+
+    def test_post_pointcloud_happy_path_completes_and_downloads(self):
+        task = self._task(self._project())
+        self._seed_assets(task)
+        self._apply(task, use_scale=False)
+
+        res = self.client.post(self._url(task))
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.content)
+        self.assertIn('celery_task_id', res.data)
+
+        # El sondeo real de progreso pasa por el endpoint genérico del framework
+        # (contracts/api.md) — se confirma que responde, pero no se afirma `ready` aquí:
+        # `TestSafeAsyncResult` en tests es `MockAsyncResult` (worker/celery.py), que solo ve
+        # resultados registrados explícitamente vía `.set()`/`store_result()`; `eval_async`
+        # (el mecanismo detrás de `run_function_async`, usado por todo el framework de
+        # plugins) nunca lo hace, así que ningún test de este repo verifica ese endpoint tras
+        # un pipeline de plugin. La finalización real (CELERY_TASK_ALWAYS_EAGER=True en tests
+        # ya ejecutó el pipeline de forma síncrona dentro del POST anterior) se verifica por
+        # el canal autoritativo: el propio estado persistido del plugin.
+        check = self.client.get('/api/workers/check/{}'.format(res.data['celery_task_id']))
+        self.assertEqual(check.status_code, status.HTTP_200_OK)
+
+        state = self.client.get("/api/plugins/realign/task/{}/realign/state".format(task.id))
+        pc = state.data['pointcloud']
+        self.assertEqual(pc['status'], 'ready')
+        self.assertTrue(pc['available'])
+        self.assertFalse(pc['stale'])
+        self.assertGreater(pc['point_count'], 0)
+
+        download = self.client.get(self._url(task, "pointcloud/download"))
+        self.assertEqual(download.status_code, status.HTTP_200_OK)
+        self.assertGreater(len(b"".join(download.streaming_content)) if download.streaming else len(download.content), 0)
+
+    def test_post_pointcloud_requires_change_project(self):
+        project = self._project()
+        assign_perm('view_project', User.objects.get(username="testuser2"), project)
+        task = self._task(project)
+        self._seed_assets(task)
+        self._apply(task, use_scale=False)
+        self.client.logout()
+        self.client.login(username="testuser2", password="test1234")
+        res = self.client.post(self._url(task))
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+
+    # --- T018: obsolescencia por cambio de modo de escala (US2-AS3) ----------
+
+    def test_pointcloud_becomes_stale_after_reapplying_with_scale(self):
+        task = self._task(self._project())
+        self._seed_assets(task)
+        self._apply(task, use_scale=False)
+        res = self.client.post(self._url(task))
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+        state = self.client.get("/api/plugins/realign/task/{}/realign/state".format(task.id))
+        self.assertTrue(state.data['pointcloud']['available'])
+
+        # Reaplicar con escala habilitada invalida la nube ya generada.
+        self._apply(task, use_scale=True)
+        state2 = self.client.get("/api/plugins/realign/task/{}/realign/state".format(task.id))
+        pc2 = state2.data['pointcloud']
+        self.assertEqual(pc2['status'], 'ready')  # el archivo sigue registrado...
+        self.assertTrue(pc2['stale'])             # ...pero ya no corresponde al ajuste vigente
+        self.assertFalse(pc2['available'])
+        self.assertEqual(pc2['ineligible_reason'], 'scale_enabled')
+
+    # --- T023: cancelar / descartar -------------------------------------------
+
+    def test_delete_pointcloud_cancels_running_and_cleans_tmp(self):
+        from app.plugins.functions import get_plugins_persistent_path
+
+        task = self._task(self._project())
+        self._seed_assets(task)
+        self._apply(task, use_scale=False)
+
+        out_dir = get_plugins_persistent_path('realign', 'task_{}'.format(task.id))
+        os.makedirs(out_dir, exist_ok=True)
+        tmp_path = os.path.join(out_dir, 'pointcloud.tmp.laz')
+        with open(tmp_path, 'wb') as f:
+            f.write(b'not a real laz, just simulating a generation in progress')
+        store.set_pointcloud_state(task.id, {'status': 'running', 'celery_task_id': 'fake-id'})
+
+        res = self.client.delete(self._url(task))
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['status'], 'absent')
+        self.assertFalse(os.path.isfile(tmp_path))
+        self.assertIsNone(store.get_pointcloud_state(task.id))
+
+    def test_delete_pointcloud_requires_change_project(self):
+        project = self._project()
+        assign_perm('view_project', User.objects.get(username="testuser2"), project)
+        task = self._task(project)
+        self.client.login(username="testuser2", password="test1234")
+        res = self.client.delete(self._url(task))
+        self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
+
+    # --- T024: Revertir descarta la nube --------------------------------------
+
+    def test_revert_discards_pointcloud(self):
+        task = self._task(self._project())
+        self._seed_assets(task)
+        self._apply(task, use_scale=False)
+        res = self.client.post(self._url(task))
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        pc = store.get_pointcloud_state(task.id)
+        self.assertEqual(pc['status'], 'ready')
+        self.assertTrue(os.path.isfile(pc['path']))
+        laz_path = pc['path']
+
+        self.client.post("/api/plugins/realign/task/{}/realign/revert".format(task.id))
+
+        self.assertIsNone(store.get_pointcloud_state(task.id))
+        self.assertFalse(os.path.isfile(laz_path))
+
+    # --- T025: reanudar el sondeo tras recargar -------------------------------
+
+    def test_state_exposes_running_celery_task_id_for_resume(self):
+        task = self._task(self._project())
+        self._seed_assets(task)
+        self._apply(task, use_scale=False)
+        store.set_pointcloud_state(task.id, {'status': 'running', 'celery_task_id': 'resume-me'})
+
+        res = self.client.get("/api/plugins/realign/task/{}/realign/state".format(task.id))
+        self.assertEqual(res.data['pointcloud']['status'], 'running')
+        self.assertEqual(res.data['pointcloud']['celery_task_id'], 'resume-me')
+
+    # --- FR-017: sin nube de puntos --------------------------------------------
+
+    def test_state_reports_no_pointcloud_reason_when_absent(self):
+        task = self._task(self._project(), available_assets=["orthophoto.tif"])
+        self.client.login(username="testuser", password="test1234")
+        res = self.client.get("/api/plugins/realign/task/{}/realign/state".format(task.id))
+        pc = res.data['pointcloud']
+        self.assertEqual(pc['status'], 'absent')
+        self.assertFalse(pc['eligible'])
+        self.assertEqual(pc['ineligible_reason'], 'no_pointcloud')
 
 
 class RealignCorrectionsTest(unittest.TestCase):
