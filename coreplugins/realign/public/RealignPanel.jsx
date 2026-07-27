@@ -54,8 +54,11 @@ export default class RealignPanel extends React.Component {
         applied: false,
         busy: false,
         currentCeleryTaskId: null,
+        applyProgress: null,     // {status, progress} mientras se aplica
+        canceling: false,        // cancelación pedida, esperando a que el servidor la confirme
         pointcloud: null,        // {status, stale, available, eligible, ineligible_reason, ...}
         pointcloudProgress: null, // {status, progress} mientras status === 'running'
+        cancelingPointCloud: false, // descarte pedido, esperando confirmación del servidor
         task: props.tasks[0] || null
     };
 
@@ -130,15 +133,19 @@ export default class RealignPanel extends React.Component {
     // (preserva el comportamiento con el que se crearon — FR-020, D9).
     const useScale = (res.transform && typeof res.transform.use_scale === 'boolean') ? res.transform.use_scale : true;
     const pointcloud = res.pointcloud || null;
+    // Si la última aplicación falló, el motivo lo guarda el servidor: al recargar la página el
+    // resultado de Celery ya no está y sin esto el panel volvía a previsualización sin explicar
+    // por qué no hay productos corregidos.
+    const error = res.state === 'error' && res.error ? res.error : "";
     if (Array.isArray(res.points) && res.points.length){
       const points = res.points.map(p => ({
         id: (typeof p.id === 'number' ? p.id : this._nextId++),
         source: p.source, target: p.target, residual: p.residual_m
       }));
       this._nextId = Math.max(this._nextId, ...points.map(p => p.id)) + 1;
-      this.setState({points, applied, useScale, pointcloud}, cb);
+      this.setState({points, applied, useScale, pointcloud, error}, cb);
     }else{
-      this.setState({applied, useScale, pointcloud}, cb);
+      this.setState({applied, useScale, pointcloud, error}, cb);
     }
   }
 
@@ -391,7 +398,7 @@ export default class RealignPanel extends React.Component {
   handleApply = () => {
     if (this.state.busy) return;
     const token = ++this._applyToken;
-    this.setState({busy: true, error: ""});
+    this.setState({busy: true, error: "", applyProgress: null, canceling: false});
     $.ajax({type: 'POST', url: `${this.apiBase()}/apply`,
             data: JSON.stringify({points: this.serializePoints(), use_scale: this.state.useScale}),
             contentType: 'application/json'})
@@ -401,14 +408,21 @@ export default class RealignPanel extends React.Component {
           this.setState({currentCeleryTaskId: res.celery_task_id});
           Workers.waitForCompletion(res.celery_task_id, error => {
             if (token !== this._applyToken) return; // revert/editar mientras corría → ignorar
-            if (error){ this.setState({busy: false, error, currentCeleryTaskId: null}); }
+            if (error){ this.setState({busy: false, error, currentCeleryTaskId: null, applyProgress: null}); }
             else {
-              this.setState({busy: false, applied: true, currentCeleryTaskId: null}, () => {
+              this.setState({busy: false, applied: true, currentCeleryTaskId: null, applyProgress: null}, () => {
                 this.showCorrected();
                 // Aplicar cambia state -> 'applied', una de las condiciones de elegibilidad
                 // de la nube de puntos (FR-005) — refrescar para reflejarlo.
                 this.refreshPointCloudState();
               });
+            }
+          },
+          // El pipeline reporta qué producto está corrigiendo y cuánto lleva: sin esto el
+          // usuario solo veía un botón, sin saber si había algo en marcha.
+          (statusText, progress) => {
+            if (token === this._applyToken){
+              this.setState({applyProgress: {status: statusText, progress}});
             }
           });
         }else{
@@ -416,6 +430,25 @@ export default class RealignPanel extends React.Component {
         }
       })
       .fail(xhr => { if (token === this._applyToken) this.setState({busy: false, error: this.errFromXhr(xhr)}); });
+  }
+
+  // Cancelar una aplicación en marcha. Se para por los dos lados: `Workers.cancel` corta el
+  // sondeo aquí y `persistState` hace que el backend aborte la tarea (el pipeline consulta la
+  // cancelación entre productos y durante el remuestreo) y deje el estado en previsualización,
+  // en vez de un 'applying' que ya no corresponde a nada.
+  handleCancelApply = () => {
+    if (this.state.canceling) return;
+    const celeryTaskId = this.state.currentCeleryTaskId;
+    this._applyToken++; // invalida el callback del apply en curso
+    // El botón se queda en pantalla como "Cancelando…" hasta que el servidor confirma: parar el
+    // remuestreo no es instantáneo y hacerlo desaparecer antes daría por hecho algo que aún no
+    // ha ocurrido.
+    this.setState({canceling: true});
+    if (celeryTaskId) Workers.cancel(celeryTaskId);
+    this.persistState().always(() => {
+      this.setState({busy: false, canceling: false, currentCeleryTaskId: null,
+                     applyProgress: null, error: ""});
+    });
   }
 
   handleRevert = () => {
@@ -426,7 +459,7 @@ export default class RealignPanel extends React.Component {
     $.ajax({type: 'POST', url: `${this.apiBase()}/revert`})
       .done(() => {
         this.restoreCoreLayers();
-        this.setState({busy: false, applied: false, currentCeleryTaskId: null}, () => {
+        this.setState({busy: false, applied: false, currentCeleryTaskId: null, applyProgress: null}, () => {
           this.setSemiTransparency(true);
           this.recompute();
           // Revertir descarta también la nube corregida en el servidor (FR-013) — refrescar.
@@ -469,9 +502,15 @@ export default class RealignPanel extends React.Component {
   }
 
   handleDiscardPointCloud = () => {
+    if (this.state.cancelingPointCloud) return;
+    // Igual que al cancelar la aplicación: el botón se queda visible como "Cancelando…" hasta
+    // que el servidor confirma, en vez de dar por hecho algo que aún no ha terminado.
+    this.setState({cancelingPointCloud: true});
+    const done = () => this.refreshPointCloudState()
+      .always(() => this.setState({cancelingPointCloud: false, pointcloudProgress: null}));
     $.ajax({type: 'DELETE', url: `${this.apiBase()}/pointcloud`})
-      .done(() => this.refreshPointCloudState())
-      .fail(() => this.refreshPointCloudState());
+      .done(done)
+      .fail(done);
   }
 
   errFromXhr = (xhr) => {
@@ -484,7 +523,7 @@ export default class RealignPanel extends React.Component {
   // --- Sección de nube de puntos (003-realign-pointcloud) -------------------
 
   renderPointCloudSection = () => {
-    const { pointcloud, pointcloudProgress } = this.state;
+    const { pointcloud, pointcloudProgress, cancelingPointCloud } = this.state;
     if (!pointcloud) return "";
 
     // FR-017: la tarea nunca va a tener nube en esta sesión — nota compacta, sin acción.
@@ -498,12 +537,18 @@ export default class RealignPanel extends React.Component {
     let body;
     if (pointcloud.status === 'running'){
       const pct = pointcloudProgress ? Math.round(pointcloudProgress.progress) : null;
-      body = (<div>
-        <i className="fa fa-circle-notch fa-spin" />{" "}
-        {(pointcloudProgress && pointcloudProgress.status) || _("Generando la nube corregida…")}
-        {pct !== null ? ` (${pct}%)` : ""}
-        {" — "}
-        <a href="javascript:void(0);" onClick={this.handleDiscardPointCloud}>{_("Cancelar")}</a>
+      // Mismo lenguaje que el de aplicar: progreso a la izquierda y un botón rojo con spinner a
+      // la derecha. Las dos operaciones largas del panel se cancelan igual.
+      body = (<div className="realign-running-row">
+        <div className="realign-apply-progress">
+          {(pointcloudProgress && pointcloudProgress.status) || _("Generando la nube corregida…")}
+          {pct !== null ? ` (${pct}%)` : ""}
+        </div>
+        <button type="button" className="btn btn-sm btn-danger" disabled={cancelingPointCloud}
+                onClick={this.handleDiscardPointCloud}>
+          <i className="fa fa-circle-notch fa-spin" />{" "}
+          {cancelingPointCloud ? _("Cancelando…") : _("Cancelar")}
+        </button>
       </div>);
     }else if (pointcloud.status === 'ready' && pointcloud.available){
       body = (<div>
@@ -548,7 +593,7 @@ export default class RealignPanel extends React.Component {
   }
 
   render(){
-    const { checkingAvailability, permanentError, products, points, transform, useScale, captureMode, applied, busy } = this.state;
+    const { checkingAvailability, permanentError, products, points, transform, useScale, captureMode, applied, busy, currentCeleryTaskId, applyProgress, canceling } = this.state;
 
     let content = "";
     if (checkingAvailability){
@@ -624,18 +669,33 @@ export default class RealignPanel extends React.Component {
             {_("Los puntos actuales no permiten calcular la transformación (coincidentes o insuficientes).")}
           </div> : ""}
 
-        <div className="row action-buttons">
-          <div className="col-sm-6">
-            {applied ? products.map((p, i) => (
+        {/* Flex y no el grid del core: con `max-width: 320px` cada `col-sm-6` deja 160 px, donde
+            no caben dos descargas, y las que sobraban se descolgaban del botón de la derecha. */}
+        <div className="realign-actions">
+          <div className="realign-actions-secondary">
+            {busy && currentCeleryTaskId ?
+              <div className="realign-apply-progress">
+                {(applyProgress && applyProgress.status) || _("Aplicando…")}
+                {applyProgress && applyProgress.progress ? ` (${Math.round(applyProgress.progress)}%)` : ""}
+              </div>
+            : applied ? products.map(p => (
               <a key={p} href={`${this.apiBase()}/download/${p}`}
-                 className="btn btn-sm btn-default" title={_("Descargar corregido")}
-                 style={i > 0 ? {marginLeft: 4} : null}>
+                 className="btn btn-sm btn-default" title={_("Descargar corregido")}>
                 <i className="fa fa-download" /> {p}
               </a>
             )) : ""}
           </div>
-          <div className="col-sm-6 text-right">
-            {applied ?
+          <div className="realign-actions-primary">
+            {/* Mientras se aplica, Aplicar y Revertir están deshabilitados: sin esta salida el
+                usuario que se arrepiente no tiene ninguna, y el remuestreo sigue igual. */}
+            {busy && currentCeleryTaskId ?
+              // El spinner dice que hay trabajo en marcha; el texto, qué hace el botón.
+              <button type="button" className="btn btn-sm btn-danger" onClick={this.handleCancelApply}
+                      disabled={canceling}>
+                <i className="fa fa-circle-notch fa-spin"/>{" "}
+                {canceling ? _("Cancelando…") : _("Cancelar")}
+              </button>
+              : applied ?
               <button type="button" className="btn btn-sm btn-danger" onClick={this.handleRevert} disabled={busy}>
                 {busy ? <i className="fa fa-spin fa-circle-notch"/> : <i className="fa fa-undo"/>} {_("Revertir")}
               </button>

@@ -55,6 +55,19 @@ def _remove_corrected(pk):
                     pass
 
 
+def _abort_apply(state):
+    """Cancela la aplicación en curso, si la hay.
+
+    El pipeline consulta `should_cancel` entre productos y durante el remuestreo de cada uno, así
+    que para de verdad en vez de seguir ocupando un worker hasta terminar un trabajo que ya nadie
+    quiere. Se cancela también desde el backend y no solo desde el panel que lanzó la aplicación,
+    para que sirva desde otra pestaña o navegador.
+    """
+    state = state or {}
+    if state.get('state') == 'applying' and state.get('celery_task_id'):
+        _abort_celery_task(state['celery_task_id'])
+
+
 def _validate_points(raw):
     """Valida y normaliza la lista de pares de puntos. Devuelve (points, error)."""
     if raw is None:
@@ -135,6 +148,9 @@ def _state_response(task, pk):
         'products': products,
         'corrected_available': corrected_available,
         'updated_at': state.get('updated_at'),
+        # Un fallo del pipeline solo vivía en el resultado de Celery, que se pierde al recargar:
+        # así el panel puede decir por qué no hay productos corregidos.
+        'error': state.get('error'),
         'pointcloud': _pointcloud_state_response(task, pk),
     }
 
@@ -155,6 +171,7 @@ class RealignState(TaskView):
             return Response({'error': err}, status=status.HTTP_400_BAD_REQUEST)
 
         state = store.get_state(pk) or {}
+        _abort_apply(state)
         use_scale = _use_scale_from_request(request, state)
         fit = _fit_for_task(task, points, use_scale)
         # Editar puntos vuelve a estado de previsualización (los corregidos previos se
@@ -221,11 +238,20 @@ class RealignApply(TaskView):
         })
         store.set_state(pk, state)
 
-        celery_task_id = run_function_async(
+        # `with_cancel` para que Revertir pueda parar el remuestreo en marcha, y no solo
+        # descartar su resultado cuando por fin termine.
+        async_result = run_function_async(
             corrections.run_correction_pipeline,
-            str(pk), product_list, _out_dir(pk), T, request.user.id
-        ).task_id
-        return Response({'celery_task_id': celery_task_id}, status=status.HTTP_200_OK)
+            str(pk), product_list, _out_dir(pk), T, request.user.id,
+            with_progress=True, with_cancel=True,
+        )
+        # Bajo CELERY_TASK_ALWAYS_EAGER (tests) el pipeline ya terminó y escribió su propio
+        # estado final: solo se adjunta el id si seguimos en el 'applying' que dejamos arriba.
+        current = store.get_state(pk) or {}
+        if current.get('state') == 'applying':
+            current['celery_task_id'] = async_result.task_id
+            store.set_state(pk, current)
+        return Response({'celery_task_id': async_result.task_id}, status=status.HTTP_200_OK)
 
 
 class RealignRevert(TaskView):
@@ -234,10 +260,16 @@ class RealignRevert(TaskView):
     def post(self, request, pk=None):
         task = self.get_and_check_task(request, pk)
         check_project_perms(request, task.project, ('change_project',))
+        # Parar primero: si la aplicación sigue en marcha, borrar los corregidos antes de
+        # cancelarla solo serviría para que el pipeline los volviera a escribir detrás.
+        _abort_apply(store.get_state(pk))
         _remove_corrected(pk)
         _discard_pointcloud(pk)
+        # Relectura obligatoria: `_discard_pointcloud` acaba de reescribir el documento sin su
+        # clave `pointcloud`, y guardar una copia leída antes la resucitaría.
         state = store.get_state(pk) or {}
-        state.update({'state': 'reverted', 'corrected_paths': {}, 'updated_at': _now()})
+        state.update({'state': 'reverted', 'corrected_paths': {}, 'celery_task_id': None,
+                      'error': None, 'updated_at': _now()})
         store.set_state(pk, state)
         return Response({'state': 'reverted'}, status=status.HTTP_200_OK)
 

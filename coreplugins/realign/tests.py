@@ -199,6 +199,10 @@ class RealignStateTest(BootTestCase):
         T = {'scale': 1.0, 'cos': 1.0, 'sin': 0.0, 'tx': 100.0, 'ty': -50.0}
         products = [{'type': 'orthophoto', 'src': src}]
 
+        # El pipeline solo publica su resultado si el documento sigue en el 'applying' que dejó
+        # el request al lanzarlo; se siembra igual que en producción.
+        store.set_state(task_id, {'state': 'applying'})
+
         # Ejecutar tal cual lo hace el worker: source → compile → eval en ns vacío.
         source = inspect.getsource(corrections.run_correction_pipeline)
         ns = {}
@@ -517,6 +521,9 @@ class RealignPointCloudPipelineTest(unittest.TestCase):
         orig_summary = pointcloud.read_las_summary(self.src)
         orig_meta = pointcloud.read_las_metadata(self.src)
 
+        # El pipeline solo publica si el estado sigue siendo el 'running' que dejó el request
+        # (su ausencia es justo lo que deja un "Descartar"); se siembra como en producción.
+        store.set_pointcloud_state("test-task-pc1", {'status': 'running'})
         result = pointcloud.run_pointcloud_correction("test-task-pc1", self.src, out_dir, T)
         self.assertEqual(result.get('status'), 'ready', result)
 
@@ -579,6 +586,7 @@ class RealignPointCloudPipelineTest(unittest.TestCase):
         exec(compile(source, 'file', 'exec'), ns, ns)
         out_dir = os.path.join(self.tmp, "out_eval")
         T = {'cos': 1.0, 'sin': 0.0, 'tx': 0.0, 'ty': 0.0, 'use_scale': False, 'n_points': 1}
+        store.set_pointcloud_state("eval-pc-task", {'status': 'running'})
         result = ns['run_pointcloud_correction']("eval-pc-task", self.src, out_dir, T)
         self.assertEqual(result.get('status'), 'ready')
         self.assertTrue(os.path.isfile(os.path.join(out_dir, 'pointcloud.laz')))
@@ -835,3 +843,200 @@ class RealignCorrectionsTest(unittest.TestCase):
         self.assertAlmostEqual(new_gt[3], 5000020.0)
         self.assertAlmostEqual(new_gt[1], 1.0)
         self.assertAlmostEqual(new_gt[5], -1.0)
+
+
+# --- Los pipelines de worker frente a decisiones posteriores del usuario ------------------------
+
+class WorkerRespectsLaterUserActionTest(BootTestCase):
+    """Ninguno de los dos pipelines es interrumpible a mitad de camino: el de rásteres se lanza
+    sin cancelación y el de nube solo consulta `should_cancel` mientras vive el proceso de pdal.
+    Como el usuario puede revertir o descartar mientras tanto, el resultado que llega tarde no
+    debe pisar lo que él decidió después.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.client = APIClient()
+
+    def _task(self):
+        project = Project.objects.create(owner=User.objects.get(username="testuser"),
+                                         name="realign worker race")
+        task = Task.objects.create(project=project, status=status_codes.COMPLETED,
+                                   available_assets=["orthophoto.tif"],
+                                   orthophoto_extent=TEST_EXTENT, epsg=32617)
+        ortho = task.get_asset_download_path('orthophoto.tif')
+        os.makedirs(os.path.dirname(ortho), exist_ok=True)
+        _make_synthetic_raster(ortho)
+        self.addCleanup(shutil.rmtree, task.task_path(), ignore_errors=True)
+        return task
+
+    def _out_dir(self, task):
+        from .api import _out_dir
+        d = _out_dir(str(task.id))
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def _products(self, task):
+        return [{'type': 'orthophoto',
+                 'src': os.path.abspath(task.get_asset_download_path('orthophoto.tif'))}]
+
+    IDENTITY = {'scale': 1.0, 'cos': 1.0, 'sin': 0.0, 'tx': 1.0, 'ty': 1.0}
+
+    def test_revert_during_apply_is_not_undone_by_the_worker(self):
+        task = self._task()
+        self.client.login(username="testuser", password="test1234")
+        url = "/api/plugins/realign/task/{}/realign".format(task.id)
+
+        self.client.put(url + "/state", {'points': POINTS_OK, 'use_scale': False}, format='json')
+        state = store.get_state(str(task.id))
+        state['state'] = 'applying'
+        store.set_state(str(task.id), state)
+
+        # El usuario revierte mientras el pipeline sigue trabajando...
+        self.assertEqual(self.client.post(url + "/revert").status_code, status.HTTP_200_OK)
+        # ...y el worker termina después.
+        out_dir = self._out_dir(task)
+        result = corrections.run_correction_pipeline(
+            str(task.id), self._products(task), out_dir, self.IDENTITY, None)
+
+        self.assertTrue(result.get('discarded'), result)
+        final = self.client.get(url + "/state").data
+        self.assertEqual(final['state'], 'reverted', 'el worker resucitó lo que el usuario revirtió')
+        self.assertFalse(final['corrected_available'])
+        self.assertFalse(os.path.isfile(os.path.join(out_dir, 'orthophoto.tif')),
+                         'quedó un corregido huérfano tras el revert')
+
+    def test_apply_completing_normally_still_marks_applied(self):
+        """La guarda no debe romper el camino feliz."""
+        task = self._task()
+        self.client.login(username="testuser", password="test1234")
+        url = "/api/plugins/realign/task/{}/realign".format(task.id)
+        self.client.put(url + "/state", {'points': POINTS_OK, 'use_scale': False}, format='json')
+        state = store.get_state(str(task.id))
+        state['state'] = 'applying'
+        store.set_state(str(task.id), state)
+
+        corrections.run_correction_pipeline(
+            str(task.id), self._products(task), self._out_dir(task), self.IDENTITY, None)
+
+        final = self.client.get(url + "/state").data
+        self.assertEqual(final['state'], 'applied')
+        self.assertTrue(final['corrected_available'])
+
+    def test_failed_apply_reports_error_instead_of_staying_applying(self):
+        task = self._task()
+        self.client.login(username="testuser", password="test1234")
+        url = "/api/plugins/realign/task/{}/realign".format(task.id)
+        self.client.put(url + "/state", {'points': POINTS_OK, 'use_scale': False}, format='json')
+        state = store.get_state(str(task.id))
+        state['state'] = 'applying'
+        store.set_state(str(task.id), state)
+
+        broken = [{'type': 'orthophoto', 'src': '/no/existe/orthophoto.tif'}]
+        result = corrections.run_correction_pipeline(
+            str(task.id), broken, self._out_dir(task), self.IDENTITY, None)
+
+        self.assertIn('error', result)
+        final = self.client.get(url + "/state").data
+        self.assertEqual(final['state'], 'error', 'el estado se quedó colgado en applying')
+        self.assertTrue(final['error'], 'el motivo del fallo debe llegar al panel')
+        self.assertFalse(final['corrected_available'])
+
+    def test_discarded_pointcloud_is_not_republished_by_the_worker(self):
+        """Mismo criterio en la nube: descartar mientras corre gana sobre el resultado tardío."""
+        task = self._task()
+        store.set_pointcloud_state(str(task.id), {'status': 'absent'})  # como tras un DELETE
+        out_dir = self._out_dir(task)
+        os.makedirs(out_dir, exist_ok=True)
+        final_path = os.path.join(out_dir, 'pointcloud.laz')
+
+        result = pointcloud.run_pointcloud_correction(
+            str(task.id), '/no/existe.laz', out_dir,
+            {'cos': 1.0, 'sin': 0.0, 'tx': 1.0, 'ty': 1.0, 'use_scale': False}, None)
+
+        self.assertTrue(result.get('discarded'), result)
+        self.assertEqual(store.get_pointcloud_state(str(task.id)).get('status'), 'absent',
+                         'el worker reescribió un estado que el usuario ya había descartado')
+        self.assertFalse(os.path.isfile(final_path))
+
+    def test_cancel_stops_the_pipeline_and_leaves_nothing_behind(self):
+        """Cancelar mientras se aplica: el pipeline para en cuanto lo consulta y no publica nada."""
+        task = self._task()
+        self.client.login(username="testuser", password="test1234")
+        url = "/api/plugins/realign/task/{}/realign".format(task.id)
+        self.client.put(url + "/state", {'points': POINTS_OK, 'use_scale': False}, format='json')
+        state = store.get_state(str(task.id))
+        state['state'] = 'applying'
+        store.set_state(str(task.id), state)
+
+        out_dir = self._out_dir(task)
+        result = corrections.run_correction_pipeline(
+            str(task.id), self._products(task), out_dir, self.IDENTITY, None,
+            should_cancel=lambda: True)
+
+        self.assertTrue(result.get('canceled'), result)
+        self.assertFalse(os.path.isfile(os.path.join(out_dir, 'orthophoto.tif')),
+                         'una aplicación cancelada no debe dejar productos a medias')
+        self.assertEqual(store.get_state(str(task.id))['state'], 'applying',
+                         'el estado lo resuelve el request que canceló, no el pipeline')
+
+    def test_editing_points_aborts_a_running_apply(self):
+        """Editar los puntos mientras se aplica también cancela: el trabajo en curso usa un
+        ajuste que el usuario acaba de cambiar."""
+        task = self._task()
+        self.client.login(username="testuser", password="test1234")
+        url = "/api/plugins/realign/task/{}/realign".format(task.id)
+        self.client.put(url + "/state", {'points': POINTS_OK, 'use_scale': False}, format='json')
+        state = store.get_state(str(task.id))
+        state.update({'state': 'applying', 'celery_task_id': 'fake-task-id'})
+        store.set_state(str(task.id), state)
+
+        aborted = []
+        from . import api
+        original = api._abort_celery_task
+        api._abort_celery_task = lambda tid: aborted.append(tid)
+        self.addCleanup(setattr, api, '_abort_celery_task', original)
+
+        res = self.client.put(url + "/state", {'points': POINTS_OK, 'use_scale': False}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.content)
+        self.assertEqual(aborted, ['fake-task-id'], 'no se canceló la aplicación en curso')
+        self.assertEqual(res.data['state'], 'previewing')
+
+    def test_apply_reports_progress_while_resampling(self):
+        """El panel muestra un spinner con el producto y el porcentaje: el dato sale del
+        callback de progreso de gdalwarp, no de un contador por producto."""
+        task = self._task()
+        store.set_state(str(task.id), {'state': 'applying'})
+        reports = []
+
+        corrections.run_correction_pipeline(
+            str(task.id), self._products(task), self._out_dir(task), self.IDENTITY, None,
+            progress_callback=lambda status, progress: reports.append((status, progress)))
+
+        self.assertTrue(reports, 'no se reportó ningún avance')
+        self.assertTrue(all('orthophoto' in s for s, _p in reports), reports)
+        percentages = [p for _s, p in reports]
+        self.assertEqual(percentages, sorted(percentages), 'el avance retrocede: {}'.format(percentages))
+        self.assertTrue(all(0 <= p <= 100 for p in percentages), percentages)
+
+    def test_cancel_during_resampling_stops_the_warp(self):
+        """Cancelar a mitad del remuestreo (no solo entre productos) aborta el warp en marcha."""
+        task = self._task()
+        store.set_state(str(task.id), {'state': 'applying'})
+        out_dir = self._out_dir(task)
+
+        # Deja pasar la comprobación previa al producto y cancela ya dentro de gdalwarp.
+        calls = {'n': 0}
+
+        def cancel_after_first_check():
+            calls['n'] += 1
+            return calls['n'] > 1
+
+        result = corrections.run_correction_pipeline(
+            str(task.id), self._products(task), out_dir, self.IDENTITY, None,
+            should_cancel=cancel_after_first_check)
+
+        self.assertTrue(result.get('canceled'), result)
+        self.assertGreater(calls['n'], 1, 'la cancelación no llegó a consultarse dentro del warp')
+        self.assertFalse(os.path.isfile(os.path.join(out_dir, 'orthophoto.tif')),
+                         'un warp abortado no debe dejar el producto a medias')

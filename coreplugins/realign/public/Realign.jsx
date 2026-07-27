@@ -5,12 +5,14 @@ import PropTypes from 'prop-types';
 import { _ } from 'webodm/classes/gettext';
 import './Realign.scss';
 import RealignPanel from './RealignPanel';
+import { bringToFront, sendToBack } from './panelStacking';
 
 class RealignButton extends React.Component {
   static propTypes = {
     tasks: PropTypes.array.isRequired,
     tiles: PropTypes.array.isRequired,
-    map: PropTypes.object.isRequired
+    map: PropTypes.object.isRequired,
+    container: PropTypes.object // contenedor del control, para el apilado entre plugins
   }
 
   constructor(props){
@@ -23,10 +25,14 @@ class RealignButton extends React.Component {
 
   handleOpen = () => {
     this.setState({showPanel: true});
+    // Al abrir, este control pasa por delante de los paneles de otros plugins (todos comparten
+    // la esquina topright y el mismo nivel base).
+    bringToFront(this.props.container);
   }
 
   handleClose = () => {
     this.setState({showPanel: false});
+    sendToBack(this.props.container);
   }
 
   render(){
@@ -55,7 +61,7 @@ export default L.Control.extend({
         var container = L.DomUtil.create('div', 'leaflet-control-realign leaflet-bar leaflet-control');
         L.DomEvent.disableClickPropagation(container);
         L.DomEvent.disableScrollPropagation(container);
-        ReactDOM.render(<RealignButton map={this.options.map} tasks={this.options.tasks} tiles={this.options.tiles} />, container);
+        ReactDOM.render(<RealignButton map={this.options.map} tasks={this.options.tasks} tiles={this.options.tiles} container={container} />, container);
 
         return container;
     }

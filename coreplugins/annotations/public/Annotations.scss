@@ -5,7 +5,13 @@
   // icono, queda por debajo de otros controles del mapa (p. ej. Contours, que sí usa
   // `!important` — mismo patrón en viewshed/objdetect/realign). Encontrado en T063 al ver
   // "Aplanar" inalcanzable bajo el botón de Contours.
-  z-index: 1000 !important;
+  //
+  // Nivel base común a todos los controles de plugin (contours, viewshed, objdetect, realign
+  // usan el mismo): quedarse por encima de ellos hacía que este icono se dibujara *dentro* del
+  // panel abierto de otro plugin, porque todos comparten la esquina topright y esos paneles son
+  // más anchos que un botón. Quién manda mientras hay un panel abierto lo decide
+  // `panelStacking.js` en tiempo de ejecución, no un número fijo aquí.
+  z-index: 999 !important;
 
   a.leaflet-control-annotations-button{
     background: url(icon.svg) no-repeat 0 0;

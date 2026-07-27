@@ -18,7 +18,11 @@
   // caja de 30x30 y su texto se solapaba con lo de abajo. Aquí los enlaces son enlaces, así que se
   // deshace ese tratamiento de una vez para todo el panel. `!important` porque el del core lo lleva
   // en el fondo y porque las reglas de tamaño empatan en especificidad con esta.
-  a{
+  // `:hover` va incluido a propósito: el core repite esas mismas propiedades en
+  // `.leaflet-bar a:hover` con la especificidad de la regla de reposo, así que sin esto el
+  // enlace vuelve a `display:block` al pasar el ratón, se estira a todo el ancho y se escapa
+  // del cursor.
+  a, a:hover, a:focus{
     display: inline;
     width: auto !important;
     height: auto !important;
@@ -26,6 +30,20 @@
     text-align: inherit;
     background: transparent !important;
     border: none;
+  }
+
+  // El core también impone `color:#000; text-decoration:none` a todo `a` de un control: sin esto
+  // los enlaces del panel se ven como texto muerto, sin color ni respuesta al pasar el ratón.
+  // `!important` en el color porque el del core también lo lleva
+  // (`.leaflet-bar a, .leaflet-control > a { color: #2c3e50 !important }`).
+  a:not(.btn){
+    color: #3498db !important;
+    cursor: pointer;
+
+    &:hover, &:focus{
+      color: #18bc9c !important;
+      text-decoration: underline !important;
+    }
   }
 
   .close-button{

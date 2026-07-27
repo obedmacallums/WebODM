@@ -35,6 +35,14 @@ function toEvaluable(src){
   if (defaultClass){
     return out.replace('export default class', 'class') + '\nreturn ' + defaultClass[1] + ';';
   }
+
+  // Exports nombrados (`export function foo`): se devuelven agrupados, como haría el import.
+  const named = Array.from(out.matchAll(/export\s+function\s+(\w+)/g), m => m[1]);
+  if (named.length){
+    return out.replace(/export\s+function\s/g, 'function ') +
+           '\nreturn {' + named.join(', ') + '};';
+  }
+
   return out.replace('export default {', 'return {');
 }
 

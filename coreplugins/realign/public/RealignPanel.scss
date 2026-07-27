@@ -65,8 +65,82 @@
     color: #444;
   }
 
+  // El core estiliza como botón de barra cualquier `a` que cuelgue de un control del mapa
+  // (`.leaflet-bar a { width:26px; height:26px; line-height:26px; display:block }`, y 30x30 con
+  // `.leaflet-touch`). Dentro de un panel eso mete cada enlace en una caja del tamaño de un
+  // icono con el texto desbordado por fuera: los nombres de los productos se solapaban entre sí
+  // y el hover solo pintaba esa caja, no el botón entero. Aquí los enlaces son enlaces.
+  // Mismo tratamiento que en el panel de annotations.
+  // El estado `:hover` hay que cubrirlo aparte: el core repite ahí las mismas propiedades
+  // (`.leaflet-bar a:hover`) con la especificidad de la regla de reposo, así que al pasar el
+  // ratón el enlace volvía a `display:block` y se estiraba a todo el ancho — moviéndose fuera
+  // del cursor y haciendo casi imposible acertarle.
+  a{
+    &, &:hover, &:focus{
+      display: inline-block;
+      width: auto !important;
+      height: auto !important;
+      line-height: inherit !important;
+      text-align: inherit;
+    }
+
+    // El core también impone `color:#000; text-decoration:none` a todo `a` de un control, así
+    // que sin esto los enlaces del panel quedaban como texto muerto: ni color de enlace, ni
+    // subrayado, ni cambio al pasar el ratón. Se les devuelve el aspecto del tema (el fondo gris
+    // del hover no, que está pensado para los botones cuadrados de la barra).
+    // `!important` en el color porque el del core también lo lleva
+    // (`.leaflet-bar a, .leaflet-control > a { color: #2c3e50 !important }`).
+    &:not(.btn){
+      color: #3498db !important;
+      cursor: pointer;
+
+      &:hover, &:focus{
+        color: #18bc9c !important;
+        text-decoration: underline !important;
+        background: transparent !important;
+      }
+    }
+  }
+
+  // Fila de "Añadir par de puntos" / "Limpiar" (una sola columna, ocupa todo el ancho).
   .action-buttons{
     margin-bottom: 8px;
+  }
+
+  // Descargas a la izquierda y acción principal a la derecha, en la misma línea si caben. El
+  // panel es estrecho (max-width 320px), así que lo normal es que las descargas ocupen su propia
+  // fila: con `wrap` bajan juntas y alineadas en vez de descolgarse una a una.
+  .realign-actions{
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+
+    .realign-actions-secondary{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 4px;
+      // Fila propia: en 320 px no caben las descargas y la acción principal a la vez, y
+      // repartirlas comprimía los botones por debajo de su texto.
+      flex: 1 1 100%;
+
+      &:empty{
+        display: none; // sin descargas no debe dejar ni el hueco ni el gap
+      }
+
+      > .btn{
+        // Sin esto el flex los encoge, el texto se sale del fondo del botón y el hover queda a
+        // media altura del contenido.
+        flex: 0 0 auto;
+        white-space: nowrap;
+      }
+    }
+
+    .realign-actions-primary{
+      margin-left: auto; // pegado a la derecha aunque las descargas hayan bajado de línea
+    }
   }
 
   .realign-points-wrapper{
@@ -102,6 +176,25 @@
     .realign-note{
       color: #888;
       margin-top: 4px;
+    }
+  }
+
+  // Qué producto se está corrigiendo, junto al botón de cancelar.
+  .realign-apply-progress{
+    color: #888;
+    padding-top: 6px;
+  }
+
+  // Fila de una operación en marcha: avance a la izquierda, botón de cancelar a la derecha.
+  // La comparten aplicar y generar la nube, para que las dos se vean y se corten igual.
+  .realign-running-row{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+
+    .realign-apply-progress{
+      padding-top: 0;
     }
   }
 

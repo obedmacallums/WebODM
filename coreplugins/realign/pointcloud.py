@@ -165,6 +165,16 @@ def run_pointcloud_correction(task_id, src_path, out_dir, transform, applied_by=
     def _now():
         return datetime.datetime.utcnow().isoformat() + 'Z'
 
+    def _still_running():
+        """El estado sigue siendo el 'running' que dejó el request que nos lanzó.
+
+        Un DELETE (descartar) borra estado y archivos de forma síncrona mientras esto corre, y
+        `should_cancel` solo se consulta mientras vive el proceso de pdal: sin esta comprobación,
+        lo que se escriba después resucitaría un resultado que el usuario ya descartó.
+        """
+        state = store.get_pointcloud_state(task_id)
+        return bool(state) and state.get('status') == 'running'
+
     def _fail(message, tmp_path=None, pipeline_path=None):
         for p in (tmp_path, pipeline_path):
             if p and os.path.isfile(p):
@@ -172,6 +182,8 @@ def run_pointcloud_correction(task_id, src_path, out_dir, transform, applied_by=
                     os.remove(p)
                 except OSError:
                     pass
+        if not _still_running():
+            return {'discarded': True}
         state = store.get_pointcloud_state(task_id) or {}
         state.update({'status': 'error', 'error': message, 'celery_task_id': None, 'updated_at': _now()})
         store.set_pointcloud_state(task_id, state)
@@ -261,6 +273,17 @@ def run_pointcloud_correction(task_id, src_path, out_dir, transform, applied_by=
 
     if not os.path.isfile(tmp_path):
         return _fail("El pipeline terminó sin generar el archivo esperado.")
+
+    if not _still_running():
+        # Descartado entre que pdal terminó y este punto: no se publica el resultado ni se deja
+        # el .laz recién escrito, que ya nadie espera.
+        for p in (tmp_path, final_path):
+            if os.path.isfile(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+        return {'discarded': True}
 
     os.replace(tmp_path, final_path)
 

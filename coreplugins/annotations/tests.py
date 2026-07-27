@@ -957,6 +957,9 @@ class FrontendUnitTest(SimpleTestCase):
     def test_annotations_bridge_delete_and_download(self):
         self._run_js('annotationsBridge.test.js')
 
+    def test_panel_stacking_between_plugins(self):
+        self._run_js('panelStacking.test.js')
+
 
 # --- Concurrencia sobre el documento compartido de una tarea ------------------------------------
 
