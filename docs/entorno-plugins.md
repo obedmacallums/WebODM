@@ -41,6 +41,7 @@ La base de datos (`webodm/webodm_db`) es Postgres+PostGIS y Django usa el backen
 | geodeep | 0.9.12 | inferencia con IA sobre rásteres geoespaciales (detección de objetos) |
 | pillow | 11.3.0 | imágenes |
 | piexif | 1.1.3 | EXIF |
+| pyproj | 3.6.1 | transformación de CRS; **no está en `requirements.txt`** (llega como dependencia transitiva, probablemente de `rasterio`/`rio-tiler`) — disponible de hecho en `webapp` y `worker` (verificado con `import pyproj`), pero un plugin que lo use debe declararlo igual en su propio `requirements.txt` (Principio IV): esta feature no lo usa porque no está declarado y `rasterio.warp.transform` cubre lo necesario sin depender de él |
 
 ## No disponible (declarar en el plugin si se necesita)
 
@@ -53,7 +54,7 @@ sin rebuild de imagen:
   GEOS vía GeoDjango.
 - **python-pdal**, **laspy** — manejo de LAZ/LAS desde Python. Alternativa sin
   dependencia: CLI `pdal` por `subprocess`.
-- **geopandas**, **fiona**, **pyproj** — los wheels incluyen sus libs nativas.
+- **geopandas**, **fiona** — los wheels incluyen sus libs nativas.
 - **opencv** (`opencv-python-headless`).
 
 ## Cómo agregar dependencias nuevas
