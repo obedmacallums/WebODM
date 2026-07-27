@@ -1,0 +1,42 @@
+.leaflet-control-annotations{
+  position: relative;
+  // El CSS base de Leaflet fija `.leaflet-control` en z-index:800 con la misma especificidad
+  // que esta regla; sin `!important` el cascade lo pisa y el panel, aunque más ancho que el
+  // icono, queda por debajo de otros controles del mapa (p. ej. Contours, que sí usa
+  // `!important` — mismo patrón en viewshed/objdetect/realign). Encontrado en T063 al ver
+  // "Aplanar" inalcanzable bajo el botón de Contours.
+  z-index: 1000 !important;
+
+  a.leaflet-control-annotations-button{
+    background: url(icon.svg) no-repeat 0 0;
+    background-size: 26px 26px;
+    border-radius: 2px;
+  }
+
+  div.annotations-panel{ display: none; }
+
+  .open{
+    a.leaflet-control-annotations-button{
+      display: none;
+    }
+
+    div.annotations-panel{
+      display: block;
+    }
+  }
+}
+.leaflet-touch .leaflet-control-annotations a {
+  background-position: 2px 2px;
+}
+
+// Marcadores de edición de vértices (PolylineEditor.js), fuera de .leaflet-control-annotations
+// porque Leaflet los añade directamente al marker-pane del mapa, no dentro del control.
+.annotations-vertex-marker{
+  width: 10px;
+  height: 10px;
+  background: #fff;
+  border: 2px solid #ff5722;
+  border-radius: 50%;
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
+  cursor: move;
+}

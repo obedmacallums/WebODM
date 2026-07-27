@@ -1,0 +1,13 @@
+{
+	"name": "Annotations",
+	"webodmMinVersion": "3.2.5",
+	"description": "Draw and persist annotated polylines on the 2D map, flat or draped over the terrain, with elevation profiles and GeoJSON export",
+	"version": "1.0.0",
+	"author": "Obed Macallums",
+	"email": "obedmacallums@gmail.com",
+	"repository": "https://github.com/OpenDroneMap/WebODM",
+	"tags": ["annotations", "polyline", "elevation", "geojson"],
+	"homepage": "https://github.com/OpenDroneMap/WebODM",
+	"experimental": false,
+	"deprecated": false
+}
