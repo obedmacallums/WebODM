@@ -310,6 +310,13 @@ export default class AnnotationsPanel extends React.Component {
     this.setState({editingGeometryId: polyline.id, error: ""});
   }
 
+  // El hint nace dentro de la lista, que tiene scroll propio: al editar una polilínea del final
+  // el texto que explica los gestos aparecía por debajo del área visible, justo cuando hace
+  // falta. `nearest` desplaza lo mínimo para descubrirlo, sin dar un salto a media lista.
+  handleEditHintRef = (el) => {
+    if (el && el.scrollIntoView) el.scrollIntoView({block: 'nearest'});
+  }
+
   handleGeometryChanged = (polylineId, latlngs) => {
     const vertices = bridge.toVertices(latlngs);
 
@@ -516,7 +523,7 @@ export default class AnnotationsPanel extends React.Component {
               {isEditingGeometry ? _("Listo") : _("Editar geometría")}
             </button>
           </div>
-          {isEditingGeometry ? (<div className="annotations-edit-hint">
+          {isEditingGeometry ? (<div className="annotations-edit-hint" ref={this.handleEditHintRef}>
             {_("Arrastra un nodo para moverlo, click sobre la línea para añadir uno y click derecho sobre un nodo para quitarlo.")}
           </div>) : null}
         </li>);

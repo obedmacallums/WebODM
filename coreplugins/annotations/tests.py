@@ -3,6 +3,8 @@ import json
 import time
 import shutil
 import threading
+import unittest
+import subprocess
 from unittest import mock
 
 import numpy as np
@@ -12,7 +14,7 @@ from rasterio.transform import from_origin
 from django.contrib.auth.models import User
 from django.contrib.gis.geos import Polygon
 from django.db import connection as db_connection
-from django.test import TransactionTestCase
+from django.test import SimpleTestCase, TransactionTestCase
 from guardian.shortcuts import assign_perm
 from rest_framework.test import APIClient
 
@@ -913,6 +915,47 @@ class AnnotationsBusRuleTest(AnnotationsTestBase):
         body = self._handler_body(self._bridge_source(), 'onDownloadAnnotations')
         self.assertIn('return false', body)
         self.assertLess(body.index('return false'), body.index('downloadExport'))
+
+
+# --- Unidades del frontend (`public/tests/*.test.js`) -------------------------------------------
+
+JS_TESTS_DIR = os.path.join(os.path.dirname(__file__), 'public', 'tests')
+
+
+def _js_runtime_available():
+    """`node` con `jsdom` y `leaflet` resolubles desde `public/tests`. Fuera de la imagen (p. ej.
+    el Mac del desarrollador, sin `node_modules`) no lo están y los casos se saltan: el frontend
+    se prueba en Docker, igual que el resto de la suite."""
+    if shutil.which('node') is None:
+        return False
+    # `require.resolve` y no `require`: Leaflet toca `window` al cargarse y sin DOM lanzaría,
+    # haciendo pasar por ausente una dependencia que sí está.
+    probe = subprocess.run(
+        ['node', '-e', 'require.resolve("jsdom"); require.resolve("leaflet")'],
+        cwd=JS_TESTS_DIR, capture_output=True)
+    return probe.returncode == 0
+
+
+@unittest.skipUnless(_js_runtime_available(), 'node/jsdom/leaflet no disponibles fuera de Docker')
+class FrontendUnitTest(SimpleTestCase):
+    """Ejecuta los tests de `public/tests` con el intérprete que ya trae la imagen.
+
+    El `jest.config.js` del core solo cubre `app/static/app/js` y es un archivo de upstream que no
+    se toca (Principio I), así que el plugin trae sus propios casos y los engancha aquí para que
+    corran con la suite de siempre. Cargan los módulos reales de `public/`, no una copia.
+    """
+
+    def _run_js(self, script):
+        proc = subprocess.run(['node', script], cwd=JS_TESTS_DIR,
+                              capture_output=True, text=True, timeout=120)
+        if proc.returncode != 0:
+            self.fail('{} falló:\n{}\n{}'.format(script, proc.stdout, proc.stderr))
+
+    def test_polyline_editor_vertex_insertion(self):
+        self._run_js('polylineEditor.test.js')
+
+    def test_annotations_bridge_delete_and_download(self):
+        self._run_js('annotationsBridge.test.js')
 
 
 # --- Concurrencia sobre el documento compartido de una tarea ------------------------------------
