@@ -40,6 +40,8 @@ export default class RoadPanel extends React.Component {
       launching: false,
       showParams: false,
       params: {},
+      axisSource: 'annotation',
+      uploadFile: null,
       pendingConfirm: null,
       selectedAxis: "",
       selectedModel: "",
@@ -154,25 +156,45 @@ export default class RoadPanel extends React.Component {
 
   // --- Lanzar, recalcular, cancelar, borrar ----------------------------------------------
 
-  payload(extra = {}){
-    return Object.assign({
-      axis: {kind: 'annotation', ref: this.state.selectedAxis},
-      model: this.state.selectedModel,
-      variant: this.state.selectedVariant,
-      params: this.state.params
-    }, extra);
+  canCalculate(){
+    return this.state.axisSource === 'upload'
+      ? !!this.state.uploadFile
+      : !!this.state.selectedAxis;
+  }
+
+  // Dos cuerpos distintos para el mismo endpoint: JSON cuando el eje es una anotación, multipart
+  // cuando se sube un archivo. `contentType: false` y `processData: false` son obligatorios en el
+  // segundo caso: jQuery serializaría el FormData a texto y el archivo se perdería.
+  requestOptions(confirm){
+    const { axisSource, uploadFile, selectedAxis, selectedModel, selectedVariant, params } = this.state;
+    const common = {model: selectedModel, variant: selectedVariant};
+
+    if (axisSource === 'upload'){
+      const form = new FormData();
+      form.append('file', uploadFile);
+      form.append('model', common.model);
+      form.append('variant', common.variant);
+      form.append('params', JSON.stringify(params));
+      if (confirm) form.append('confirm', 'true');
+      return {data: form, contentType: false, processData: false};
+    }
+
+    return {
+      contentType: 'application/json',
+      data: JSON.stringify(Object.assign({
+        axis: {kind: 'annotation', ref: selectedAxis}, params
+      }, common, confirm ? {confirm: true} : {}))
+    };
   }
 
   handleCalculate = (confirm = false) => {
-    if (!this.state.selectedAxis) return;
+    if (!this.canCalculate()) return;
 
     this.setState({launching: true, error: ""});
-    $.ajax({
+    $.ajax(Object.assign({
       url: `${this.apiBase()}/analyses`,
-      type: 'POST',
-      contentType: 'application/json',
-      data: JSON.stringify(this.payload(confirm ? {confirm: true} : {}))
-    }).done(() => {
+      type: 'POST'
+    }, this.requestOptions(confirm))).done(() => {
       this.setState({pendingConfirm: null});
       this.loadAnalyses();
       this.startPolling();
@@ -248,28 +270,60 @@ export default class RoadPanel extends React.Component {
   // --- Render ---------------------------------------------------------------------------
 
   renderAxisSelector(){
-    const { capabilities, selectedAxis } = this.state;
+    const { capabilities, selectedAxis, axisSource, uploadFile } = this.state;
+    const hasAxes = capabilities.annotations_available && capabilities.axes.length > 0;
 
-    if (!capabilities.annotations_available){
-      return (<div className="road-notice">
-        {_("El plugin de anotaciones no está disponible, así que no hay ejes que elegir.")}
-      </div>);
-    }
-    if (!capabilities.axes.length){
-      return (<div className="road-notice">
-        {_("Esta tarea no tiene ninguna polilínea 2D. Traza una sobre el camino para poder analizarlo.")}
-      </div>);
-    }
+    return (<div className="road-axis">
+      <div className="road-axis-source">
+        <label>
+          <input type="radio" checked={axisSource === 'annotation'} disabled={!hasAxes}
+                 onChange={() => this.setState({axisSource: 'annotation'})} />
+          {_("Anotación")}
+        </label>
+        <label>
+          <input type="radio" checked={axisSource === 'upload'}
+                 onChange={() => this.setState({axisSource: 'upload'})} />
+          {_("Archivo GeoJSON")}
+        </label>
+      </div>
 
-    return (<div className="form-group">
-      <label>{_("Eje")}</label>
-      <select className="form-control" value={selectedAxis}
-              onChange={e => this.setState({selectedAxis: e.target.value})}>
-        {capabilities.axes.map(axis =>
-          <option key={axis.id} value={axis.id}>
-            {axis.name} ({axis.plan_length.toFixed(0)} m)
-          </option>)}
-      </select>
+      {/* El motivo importa: sin `annotations` no hay nada que arreglar en esta tarea, mientras que
+          con el plugin activo y sin polilíneas la acción es trazar una. */}
+      {!capabilities.annotations_available ?
+        <div className="road-notice">
+          {_("El plugin de anotaciones no está disponible, así que no hay ejes que elegir. Puedes subir un archivo.")}
+        </div>
+        : !capabilities.axes.length ?
+        <div className="road-notice">
+          {_("Esta tarea no tiene ninguna polilínea 2D. Traza una sobre el camino, o sube un archivo.")}
+        </div>
+        : null}
+
+      {axisSource === 'annotation' && hasAxes ?
+        <div className="form-group">
+          <label>{_("Eje")}</label>
+          <select className="form-control" value={selectedAxis}
+                  onChange={e => this.setState({selectedAxis: e.target.value})}>
+            {capabilities.axes.map(axis =>
+              <option key={axis.id} value={axis.id}>
+                {axis.name} ({axis.plan_length.toFixed(0)} m)
+              </option>)}
+          </select>
+        </div>
+        : null}
+
+      {axisSource === 'upload' ?
+        <div className="form-group">
+          <label>{_("Archivo")}</label>
+          <input type="file" accept=".geojson,.json,application/geo+json,application/json"
+                 onChange={e => this.setState({uploadFile: e.target.files[0] || null})} />
+          <span className="road-range">
+            {_("Un LineString 2D en EPSG:4326. Máximo")} {Math.round(
+              (capabilities.max_upload_bytes || 0) / 1048576)} MB.
+          </span>
+          {uploadFile ? <div className="road-notice">{uploadFile.name}</div> : null}
+        </div>
+        : null}
     </div>);
   }
 
@@ -458,7 +512,7 @@ export default class RoadPanel extends React.Component {
   }
 
   render(){
-    const { capabilities, analyses, loading, launching, selectedAxis, error, running } = this.state;
+    const { capabilities, analyses, loading, launching, error, running } = this.state;
     const task = this.singleTask();
 
     return (<div className="road-panel">
@@ -481,7 +535,7 @@ export default class RoadPanel extends React.Component {
           {this.renderParams()}
 
           <button className="btn btn-sm btn-primary road-calculate"
-                  disabled={!selectedAxis || launching || !!running}
+                  disabled={!this.canCalculate() || launching || !!running}
                   onClick={() => this.handleCalculate(false)}>
             {launching ? _("Lanzando…") : _("Calcular")}
           </button>

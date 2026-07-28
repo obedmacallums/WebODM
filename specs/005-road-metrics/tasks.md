@@ -170,13 +170,13 @@ resultado; después subir cada archivo inválido y comprobar que el mensaje iden
 
 ### Tests for User Story 4
 
-- [ ] T043 [P] [US4] Escribir `coreplugins/road/tests/test_upload.py`: un `LineString` válido produce análisis; un polígono, una colección con dos líneas, una línea de un solo vértice distinto, un `crs` declarado distinto de EPSG:4326 y una línea fuera de la extensión del DEM devuelven cada uno `400 invalid_axis` con un mensaje **distinto**; y con `annotations` ausente la vía del archivo sigue funcionando
+- [X] T043 [P] [US4] Escribir `coreplugins/road/tests/test_upload.py`: un `LineString` válido produce análisis; un polígono, una colección con dos líneas, una línea de un solo vértice distinto, un `crs` declarado distinto de EPSG:4326 y una línea fuera de la extensión del DEM devuelven cada uno `400 invalid_axis` con un mensaje **distinto**; y con `annotations` ausente la vía del archivo sigue funcionando
 
 ### Implementation for User Story 4
 
-- [ ] T044 [US4] Implementar `axis_from_geojson(payload, task, model)` en `coreplugins/road/axis.py` con la validación en cascada de [research.md D13](./research.md), un error nombrado por causa, y el descarte silencioso de la tercera coordenada avisando en la respuesta
-- [ ] T045 [US4] Aceptar `multipart/form-data` en el `POST` de creación y en `estimate` dentro de `coreplugins/road/api.py`, con tope de tamaño de subida expuesto en `capabilities` como `max_upload_bytes`
-- [ ] T046 [US4] Añadir a `coreplugins/road/public/RoadPanel.jsx` el selector de archivo como alternativa al selector de anotación, con el mensaje explicativo cuando `annotations_available` es `false`
+- [X] T044 [US4] Implementar `axis_from_geojson(payload, task, model)` en `coreplugins/road/axis.py` con la validación en cascada de [research.md D13](./research.md), un error nombrado por causa, y el descarte silencioso de la tercera coordenada avisando en la respuesta
+- [X] T045 [US4] Aceptar `multipart/form-data` en el `POST` de creación y en `estimate` dentro de `coreplugins/road/api.py`, con tope de tamaño de subida expuesto en `capabilities` como `max_upload_bytes`
+- [X] T046 [US4] Añadir a `coreplugins/road/public/RoadPanel.jsx` el selector de archivo como alternativa al selector de anotación, con el mensaje explicativo cuando `annotations_available` es `false`
 
 **Checkpoint**: las cuatro primeras historias funcionan de forma independiente.
 

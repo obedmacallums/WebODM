@@ -115,6 +115,123 @@ def axis_source_from_annotation(task_id, ref, crs, unit_factor=1.0):
     return None, None
 
 
+def _extract_geometry(payload):
+    """Localiza la geometría dentro del GeoJSON, admitiendo las tres formas de RFC 7946.
+
+    Se acepta un `Feature`, un `FeatureCollection` de un solo elemento o una geometría suelta, que
+    es lo que producen QGIS, una exportación de topografía y un `curl` a mano respectivamente. Más
+    de una línea se rechaza a propósito: el análisis es de **un** eje, y elegir la primera en
+    silencio dejaría al usuario mirando el resultado del camino equivocado.
+    """
+    kind = payload.get('type')
+
+    if kind == 'FeatureCollection':
+        features = payload.get('features') or []
+        if len(features) == 0:
+            raise InvalidAxis(_('El archivo no contiene ninguna entidad.'))
+        if len(features) > 1:
+            raise InvalidAxis(
+                _('El archivo contiene %(n)s entidades y el análisis necesita una sola línea. '
+                  'Deja solo el eje que quieres analizar.') % {'n': len(features)})
+        return _extract_geometry(features[0])
+
+    if kind == 'Feature':
+        geometry = payload.get('geometry')
+        if not isinstance(geometry, dict):
+            raise InvalidAxis(_('La entidad del archivo no tiene geometría.'))
+        return geometry
+
+    if isinstance(kind, str):
+        return payload
+
+    raise InvalidAxis(_('El archivo no parece un GeoJSON: falta el miembro "type".'))
+
+
+def axis_from_geojson(content, filename, task, model):
+    """`AxisSource` a partir de un GeoJSON subido, validado en cascada (`research.md` D13).
+
+    Cada paso falla con **su** mensaje. FR-003 exige identificar la causa concreta, y un "archivo
+    inválido" genérico deja al usuario probando variantes a ciegas: no es lo mismo haber exportado
+    un polígono que haber trazado la línea fuera de la zona del vuelo.
+
+    Devuelve `(vertices, aviso)`: `aviso` es `None` salvo que se haya descartado la Z.
+    """
+    import json
+
+    if isinstance(content, bytes):
+        try:
+            content = content.decode('utf-8')
+        except UnicodeDecodeError:
+            raise InvalidAxis(_('El archivo no está en UTF-8.'))
+
+    try:
+        payload = json.loads(content)
+    except ValueError as e:
+        raise InvalidAxis(_('El archivo no es JSON válido: %(err)s') % {'err': e})
+    if not isinstance(payload, dict):
+        raise InvalidAxis(_('El archivo no es un objeto GeoJSON.'))
+
+    # RFC 7946 fija CRS84 y elimina el miembro `crs`; si viene y declara otra cosa, las
+    # coordenadas no significan lo que este plugin asume y el resultado saldría desplazado.
+    crs_member = payload.get('crs')
+    if crs_member:
+        name = str(((crs_member or {}).get('properties') or {}).get('name', ''))
+        if not any(token in name.upper() for token in ('CRS84', '4326')):
+            raise InvalidAxis(
+                _('El archivo declara el CRS "%(crs)s". Solo se admite EPSG:4326 (CRS84), '
+                  'que es lo que fija GeoJSON.') % {'crs': name or crs_member})
+
+    # `geom` y no `geometry`: este módulo importa `geometry` y una local con ese nombre lo taparía
+    # justo antes de llamar a `geometry.validate_vertices`.
+    geom = _extract_geometry(payload)
+    geom_type = geom.get('type')
+    if geom_type != 'LineString':
+        raise InvalidAxis(
+            _('La geometría es de tipo %(got)s y el eje debe ser un LineString.') % {
+                'got': geom_type or _('desconocido')})
+
+    coordinates = geom.get('coordinates')
+    if not isinstance(coordinates, list):
+        raise InvalidAxis(_('La línea no tiene coordenadas.'))
+
+    warning = None
+    vertices = []
+    for position in coordinates:
+        if not isinstance(position, (list, tuple)) or len(position) < 2:
+            raise InvalidAxis(_('Cada posición de la línea debe tener al menos longitud y latitud.'))
+        if len(position) > 2 and warning is None:
+            # La Z de la línea es del modelo que la produjo, no del que elige este análisis: se
+            # descarta, pero se dice, porque el usuario que la incluyó esperaba que contara.
+            warning = _('Se descartó la tercera coordenada: las cotas salen del modelo de '
+                        'elevación elegido, no del archivo.')
+        vertices.append([position[0], position[1]])
+
+    ok, err = geometry.validate_vertices(vertices)
+    if not ok:
+        raise InvalidAxis(err)
+
+    _check_within_extent(vertices, task, model)
+    return vertices, warning
+
+
+def _check_within_extent(vertices, task, model):
+    """La línea tiene que tocar la extensión del modelo elegido.
+
+    Se comprueba contra la columna de la base de datos y no abriendo el ráster: rechazar un archivo
+    no debería costar una lectura de disco, y la extensión ya está indexada.
+    """
+    from django.contrib.gis.geos import LineString as GEOSLineString
+
+    extent = task.dsm_extent if model == 'dsm' else task.dtm_extent
+    if extent is None:
+        return
+    line = GEOSLineString([(float(v[0]), float(v[1])) for v in vertices], srid=4326)
+    if not line.intersects(extent):
+        raise InvalidAxis(
+            _('La línea queda fuera de la zona cubierta por el %(model)s de esta tarea.') % {
+                'model': model.upper()})
+
+
 def describe_axes(task_id, crs, unit_factor=1.0):
     """Ejes disponibles tal como los lista `capabilities`: sin geometría, con su longitud.
 

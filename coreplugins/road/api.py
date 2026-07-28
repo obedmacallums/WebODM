@@ -93,12 +93,56 @@ def _resolve_model_and_variant(task, data):
     return model, variant, described, None
 
 
-def _resolve_axis(task, data, described):
+def _request_data(request):
+    """Normaliza el cuerpo, que llega como JSON o como `multipart/form-data` con un archivo.
+
+    En multipart todo viaja como texto, así que `params` y `axis` se aceptan además como cadenas
+    JSON: es lo que puede mandar un `<form>` sin construir el cuerpo a mano.
+    """
+    import json
+
+    if not request.FILES:
+        return request.data
+
+    data = {}
+    for key, value in request.data.items():
+        if key in ('params', 'axis') and isinstance(value, str):
+            try:
+                data[key] = json.loads(value)
+            except ValueError:
+                data[key] = value
+        elif key == 'confirm':
+            data[key] = str(value).lower() in ('1', 'true', 'yes', 'on')
+        else:
+            data[key] = value
+    return data
+
+
+def _resolve_axis(task, data, described, request=None, model='dtm'):
     """`(axis_source, nombre_sugerido, error_response)`.
 
-    De momento solo la vía de anotación; la del archivo subido llega en US4 y entra por aquí sin
-    tocar el resto del flujo.
+    Dos vías con la misma salida: una polilínea de `annotations` o un GeoJSON subido. Que ambas
+    terminen en el mismo `AxisSource` es lo que permite que el resto del flujo —estimación,
+    candado, worker, exportación— no sepa por dónde entró el eje.
     """
+    upload = request.FILES.get('file') if request is not None and request.FILES else None
+    if upload is not None:
+        if upload.size > sources.MAX_UPLOAD_BYTES:
+            return None, None, error(
+                _('El archivo pesa %(size)s bytes y el máximo es %(max)s.') % {
+                    'size': upload.size, 'max': sources.MAX_UPLOAD_BYTES},
+                ERR_INVALID_AXIS)
+        try:
+            vertices, warning = axis_module.axis_from_geojson(
+                upload.read(), upload.name, task, model)
+            source = axis_module.build_axis_source(
+                axis_module.KIND_UPLOAD, upload.name, vertices, described['crs'],
+                described['unit_factor'])
+        except axis_module.InvalidAxis as e:
+            return None, None, error(e, ERR_INVALID_AXIS)
+        source['warning'] = str(warning) if warning else None
+        return source, upload.name, None
+
     spec = data.get('axis') or {}
     kind = spec.get('kind') or axis_module.KIND_ANNOTATION
     ref = spec.get('ref')
@@ -176,7 +220,7 @@ class AnalysisList(TaskView):
         task = self.get_and_check_task(request, pk)
         check_project_perms(request, task.project, ('change_project',))
 
-        data = request.data
+        data = _request_data(request)
         model, variant, described, failure = _resolve_model_and_variant(task, data)
         if failure is not None:
             return failure
@@ -185,7 +229,7 @@ class AnalysisList(TaskView):
         if err:
             return error(err, ERR_INVALID_PARAMETER)
 
-        source, suggested_name, failure = _resolve_axis(task, data, described)
+        source, suggested_name, failure = _resolve_axis(task, data, described, request, model)
         if failure is not None:
             return failure
 
@@ -285,7 +329,7 @@ class AnalysisEstimate(TaskView):
     def post(self, request, pk=None):
         task = self.get_and_check_task(request, pk)
 
-        data = request.data
+        data = _request_data(request)
         model, variant, described, failure = _resolve_model_and_variant(task, data)
         if failure is not None:
             return failure
@@ -294,7 +338,7 @@ class AnalysisEstimate(TaskView):
         if err:
             return error(err, ERR_INVALID_PARAMETER)
 
-        source, _name, failure = _resolve_axis(task, data, described)
+        source, _name, failure = _resolve_axis(task, data, described, request, model)
         if failure is not None:
             return failure
 
