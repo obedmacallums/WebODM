@@ -1,7 +1,8 @@
 from app.plugins import PluginBase
 from app.plugins import MountPoint
 
-from .api import (AnalysisCancel, AnalysisDetail, AnalysisExport, AnalysisList, Capabilities)
+from .api import (AnalysisCancel, AnalysisDetail, AnalysisEstimate, AnalysisExport, AnalysisList,
+                  Capabilities)
 from . import signals  # noqa: F401 - registra el receptor de task_removed (borrado en cascada)
 
 
@@ -20,6 +21,9 @@ class Plugin(PluginBase):
         return [
             MountPoint('task/(?P<pk>[^/.]+)/capabilities$', Capabilities.as_view()),
             MountPoint('task/(?P<pk>[^/.]+)/analyses$', AnalysisList.as_view()),
+            # 'estimate' es literal y va **antes** del patrón de '<analysis_id>', que si no se la
+            # tragaría como si fuera el id de un análisis.
+            MountPoint('task/(?P<pk>[^/.]+)/analyses/estimate$', AnalysisEstimate.as_view()),
             MountPoint('task/(?P<pk>[^/.]+)/analyses/(?P<analysis_id>[^/.]+)/cancel$',
                        AnalysisCancel.as_view()),
             MountPoint('task/(?P<pk>[^/.]+)/analyses/(?P<analysis_id>[^/.]+)/export$',

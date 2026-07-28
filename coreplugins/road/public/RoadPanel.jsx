@@ -7,6 +7,17 @@ import bridge from './roadBridge';
 import { colors } from './segmentStyle';
 
 const POLL_INTERVAL = 1500;
+// El recoloreado es instantáneo en el cliente; persistirlo puede esperar a que el usuario suelte
+// el deslizador. Sin esto, arrastrarlo dispara una petición por píxel movido.
+const THRESHOLD_SAVE_DELAY = 600;
+
+const PARAM_FIELDS = [
+  ['segment_length', () => _("Longitud de tramo (m)")],
+  ['search_half_width', () => _("Semiancho de búsqueda (m)")],
+  ['sample_step', () => _("Paso de muestreo (m)")],
+  ['break_threshold', () => _("Umbral de quiebre (%)")],
+  ['min_consecutive_samples', () => _("Muestras seguidas para el quiebre")]
+];
 
 export default class RoadPanel extends React.Component {
   static propTypes = {
@@ -27,18 +38,22 @@ export default class RoadPanel extends React.Component {
       error: "",
       loading: true,
       launching: false,
+      showParams: false,
+      params: {},
+      pendingConfirm: null,
       selectedAxis: "",
       selectedModel: "",
       selectedVariant: "original"
     };
 
     this._poll = null;
-    this._published = {}; // analysisId -> L.FeatureGroup
+    this._thresholdSaves = {}; // analysisId -> timeout del PATCH diferido
+    this._published = {};      // analysisId -> L.FeatureGroup
   }
 
   // El panel opera sobre una única tarea: las métricas de un camino pertenecen a un DEM concreto,
-  // y ofrecer un selector de eje que mezclara tareas invitaría a analizar una polilínea con el
-  // modelo de elevación de otra.
+  // y un selector de eje que mezclara tareas invitaría a analizar una polilínea con el modelo de
+  // elevación de otra.
   singleTask = () => this.props.tasks.length === 1 ? this.props.tasks[0] : null;
   taskId = () => { const t = this.singleTask(); return t ? t.id : null; }
   apiBase = (taskId = this.taskId()) => `/api/plugins/road/task/${taskId}`;
@@ -59,6 +74,7 @@ export default class RoadPanel extends React.Component {
     bridge.setErrorNotifier(null);
     bridge.setDeletionNotifier(null);
     this.stopPolling();
+    Object.values(this._thresholdSaves).forEach(clearTimeout);
   }
 
   handleBridgeError = (message) => this.setState({error: message});
@@ -68,16 +84,24 @@ export default class RoadPanel extends React.Component {
     this.setState({analyses: this.state.analyses.filter(a => a.id !== analysisId)});
   }
 
+  errorFrom(req, fallback){
+    const data = (req && req.responseJSON) || {};
+    return data.error || fallback;
+  }
+
   loadCapabilities(){
     $.getJSON(`${this.apiBase()}/capabilities`)
       .done(caps => {
         this.setState({
           capabilities: caps,
+          params: Object.assign({}, caps.defaults),
           selectedModel: caps.default_model || "",
           selectedAxis: caps.axes.length ? caps.axes[0].id : ""
         });
       })
-      .fail(req => this.setState({error: this.errorFrom(req, _("No se pudieron leer las opciones de esta tarea."))}));
+      .fail(req => this.setState({
+        error: this.errorFrom(req, _("No se pudieron leer las opciones de esta tarea."))
+      }));
   }
 
   loadAnalyses = () => {
@@ -91,11 +115,6 @@ export default class RoadPanel extends React.Component {
         loading: false,
         error: this.errorFrom(req, _("No se pudieron cargar los análisis."))
       }));
-  }
-
-  errorFrom(req, fallback){
-    const data = (req && req.responseJSON) || {};
-    return data.error || fallback;
   }
 
   startPolling(){
@@ -114,37 +133,75 @@ export default class RoadPanel extends React.Component {
   // cada segundo y medio, y republicar duplicaría la capa en el panel del core.
   publish(analysis){
     if (analysis.status !== 'completed' || this._published[analysis.id]) return;
+    this._published[analysis.id] = true; // reserva inmediata: el GET tarda y el sondeo no espera
     $.getJSON(`${this.apiBase()}/analyses/${analysis.id}`)
       .done(detail => {
-        const group = bridge.publishAnalysis(this.props.map, this.singleTask(), detail,
-                                             detail.segments, {stored: true});
-        this._published[analysis.id] = group;
+        this._published[analysis.id] = bridge.publishAnalysis(
+          this.props.map, this.singleTask(), detail, detail.segments, {stored: true});
       })
-      .fail(req => this.setState({
-        error: this.errorFrom(req, _("No se pudo dibujar el análisis."))
-      }));
+      .fail(req => {
+        delete this._published[analysis.id];
+        this.setState({error: this.errorFrom(req, _("No se pudo dibujar el análisis."))});
+      });
   }
 
-  handleCalculate = () => {
-    const { selectedAxis, selectedModel, selectedVariant } = this.state;
-    if (!selectedAxis) return;
+  republish(analysis){
+    const group = this._published[analysis.id];
+    if (group && group !== true) bridge.unpublishAnalysis(group);
+    delete this._published[analysis.id];
+    this.publish(analysis);
+  }
+
+  // --- Lanzar, recalcular, cancelar, borrar ----------------------------------------------
+
+  payload(extra = {}){
+    return Object.assign({
+      axis: {kind: 'annotation', ref: this.state.selectedAxis},
+      model: this.state.selectedModel,
+      variant: this.state.selectedVariant,
+      params: this.state.params
+    }, extra);
+  }
+
+  handleCalculate = (confirm = false) => {
+    if (!this.state.selectedAxis) return;
 
     this.setState({launching: true, error: ""});
     $.ajax({
       url: `${this.apiBase()}/analyses`,
       type: 'POST',
       contentType: 'application/json',
-      data: JSON.stringify({
-        axis: {kind: 'annotation', ref: selectedAxis},
-        model: selectedModel,
-        variant: selectedVariant
-      })
+      data: JSON.stringify(this.payload(confirm ? {confirm: true} : {}))
     }).done(() => {
+      this.setState({pendingConfirm: null});
       this.loadAnalyses();
       this.startPolling();
     }).fail(req => {
-      this.setState({error: this.errorFrom(req, _("No se pudo lanzar el análisis."))});
+      const data = req.responseJSON || {};
+      // 409 con `confirmation_required` no es un error que mostrar: es una pregunta que hacer.
+      if (data.code === 'confirmation_required'){
+        this.setState({pendingConfirm: {reason: data.reason, estimate: data.estimate}});
+      }else{
+        this.setState({error: this.errorFrom(req, _("No se pudo lanzar el análisis."))});
+      }
     }).always(() => this.setState({launching: false}));
+  }
+
+  handleCancel = (analysis) => {
+    $.ajax({url: `${this.apiBase()}/analyses/${analysis.id}/cancel`, type: 'POST'})
+      .done(this.loadAnalyses)
+      .fail(req => this.setState({error: this.errorFrom(req, _("No se pudo cancelar."))}));
+  }
+
+  handleDelete = (analysis) => {
+    $.ajax({url: `${this.apiBase()}/analyses/${analysis.id}`, type: 'DELETE'})
+      .done(() => {
+        const group = this._published[analysis.id];
+        if (group && group !== true) bridge.unpublishAnalysis(group);
+        delete this._published[analysis.id];
+        this.loadAnalyses();
+      })
+      .fail(req => this.setState({error: this.errorFrom(req, _("No se pudo eliminar."))}));
   }
 
   // La descarga la dispara el bridge con un enlace temporal por archivo y no con
@@ -154,15 +211,44 @@ export default class RoadPanel extends React.Component {
     bridge.downloadExport(this.taskId(), analysis.id, format);
   }
 
-  handleCancel = (analysis) => {
-    $.ajax({url: `${this.apiBase()}/analyses/${analysis.id}/cancel`, type: 'POST'})
-      .done(this.loadAnalyses)
-      .fail(req => this.setState({error: this.errorFrom(req, _("No se pudo cancelar."))}));
+  // --- Semáforo -------------------------------------------------------------------------
+
+  // Recoloreado inmediato en el cliente (SC-005) y persistencia diferida: los umbrales no
+  // intervienen en el cálculo (FR-030), así que moverlos no pide nada al servidor salvo para que
+  // el color sobreviva a una recarga.
+  handleThresholdChange = (analysis, index, value) => {
+    const thresholds = (analysis.color_thresholds || [8.0, 12.0]).slice();
+    thresholds[index] = parseFloat(value);
+    if (isNaN(thresholds[0]) || isNaN(thresholds[1])) return;
+    // El backend rechaza aviso >= alerta; se evita mandar un estado que ya se sabe inválido.
+    if (thresholds[0] >= thresholds[1]) return;
+
+    this.setState({
+      analyses: this.state.analyses.map(
+        a => a.id === analysis.id ? Object.assign({}, a, {color_thresholds: thresholds}) : a)
+    });
+    bridge.applyThresholds(analysis.id, thresholds);
+
+    clearTimeout(this._thresholdSaves[analysis.id]);
+    this._thresholdSaves[analysis.id] = setTimeout(
+      () => this.saveThresholds(analysis.id, thresholds), THRESHOLD_SAVE_DELAY);
   }
+
+  saveThresholds(analysisId, thresholds){
+    $.ajax({
+      url: `${this.apiBase()}/analyses/${analysisId}`,
+      type: 'PATCH',
+      contentType: 'application/json',
+      data: JSON.stringify({color_thresholds: thresholds})
+    }).fail(req => this.setState({
+      error: this.errorFrom(req, _("No se pudieron guardar los umbrales de color."))
+    }));
+  }
+
+  // --- Render ---------------------------------------------------------------------------
 
   renderAxisSelector(){
     const { capabilities, selectedAxis } = this.state;
-    if (!capabilities) return null;
 
     if (!capabilities.annotations_available){
       return (<div className="road-notice">
@@ -188,15 +274,111 @@ export default class RoadPanel extends React.Component {
   }
 
   renderModelSelector(){
-    const { capabilities, selectedModel } = this.state;
-    if (!capabilities || capabilities.models.length < 2) return null;
+    const { capabilities, selectedModel, selectedVariant } = this.state;
+    const variants = (capabilities.variants || {})[selectedModel] || ['original'];
 
-    return (<div className="form-group">
-      <label>{_("Modelo de elevación")}</label>
-      <select className="form-control" value={selectedModel}
-              onChange={e => this.setState({selectedModel: e.target.value, selectedVariant: 'original'})}>
-        {capabilities.models.map(m => <option key={m} value={m}>{m.toUpperCase()}</option>)}
-      </select>
+    return (<div>
+      {capabilities.models.length > 1 ?
+        <div className="form-group">
+          <label>{_("Modelo de elevación")}</label>
+          <select className="form-control" value={selectedModel}
+                  onChange={e => this.setState({selectedModel: e.target.value,
+                                                selectedVariant: 'original'})}>
+            {capabilities.models.map(m => <option key={m} value={m}>{m.toUpperCase()}</option>)}
+          </select>
+        </div>
+        : null}
+
+      {/* Solo se ofrece cuando de verdad hay más de una: un desplegable de un elemento es una
+          opción muerta que hace pensar que falta algo. */}
+      {variants.length > 1 ?
+        <div className="form-group">
+          <label>{_("Variante")}</label>
+          <select className="form-control" value={selectedVariant}
+                  onChange={e => this.setState({selectedVariant: e.target.value})}>
+            {variants.map(v => <option key={v} value={v}>
+              {v === 'realigned' ? _("Realineado") : _("Original")}
+            </option>)}
+          </select>
+        </div>
+        : null}
+    </div>);
+  }
+
+  renderParams(){
+    const { capabilities, params, showParams } = this.state;
+    const ranges = capabilities.ranges || {};
+
+    return (<div className="road-params">
+      <a onClick={() => this.setState({showParams: !showParams})}>
+        {showParams ? _("Ocultar parámetros") : _("Ajustar parámetros")}
+      </a>
+
+      {showParams ?
+        <div>
+          {PARAM_FIELDS.map(([key, label]) => {
+            const [low, high] = ranges[key] || [];
+            return (<div className="form-group" key={key}>
+              <label>{label()}</label>
+              <input type="number" className="form-control"
+                     min={low} max={high}
+                     step={key === 'min_consecutive_samples' ? 1 : 0.05}
+                     value={params[key] !== undefined ? params[key] : ''}
+                     onChange={e => this.setState({
+                       params: Object.assign({}, params, {[key]: e.target.value})
+                     })} />
+              <span className="road-range">{_("entre")} {low} {_("y")} {high}</span>
+            </div>);
+          })}
+          <a onClick={() => this.setState({params: Object.assign({}, capabilities.defaults)})}>
+            {_("Volver a los valores por defecto")}
+          </a>
+        </div>
+        : null}
+    </div>);
+  }
+
+  renderConfirm(){
+    const { pendingConfirm } = this.state;
+    if (!pendingConfirm) return null;
+    const est = pendingConfirm.estimate || {};
+
+    return (<div className="road-confirm">
+      <p>
+        {pendingConfirm.reason === 'replaces_existing' ?
+          _("Ya hay un análisis para este eje. Al continuar, se sustituye por el nuevo.")
+          : _("El análisis es costoso. Puedes lanzarlo igualmente.")}
+      </p>
+      <p className="road-estimate">
+        {est.segments} {_("tramos")}, {est.samples} {_("muestras")},
+        ~{Math.round(est.estimated_seconds || 0)} s
+      </p>
+      <button className="btn btn-xs btn-primary" onClick={() => this.handleCalculate(true)}>
+        {_("Continuar")}
+      </button>
+      <button className="btn btn-xs btn-default"
+              onClick={() => this.setState({pendingConfirm: null})}>
+        {_("Cancelar")}
+      </button>
+    </div>);
+  }
+
+  renderThresholds(analysis){
+    const [warn, alert] = analysis.color_thresholds || [8.0, 12.0];
+
+    return (<div className="road-thresholds">
+      <label>
+        {_("Aviso")}
+        <input type="range" min="1" max="49" step="0.5" value={warn}
+               onChange={e => this.handleThresholdChange(analysis, 0, e.target.value)} />
+        <span>{warn}%</span>
+      </label>
+      <label>
+        {_("Alerta")}
+        <input type="range" min="2" max="50" step="0.5" value={alert}
+               onChange={e => this.handleThresholdChange(analysis, 1, e.target.value)} />
+        <span>{alert}%</span>
+      </label>
     </div>);
   }
 
@@ -207,7 +389,11 @@ export default class RoadPanel extends React.Component {
     return (<li key={analysis.id} className={"road-analysis " + analysis.status}>
       <div className="road-analysis-header">
         <span className="road-analysis-name">{analysis.name}</span>
-        {analysis.stale ? <span className="road-badge stale" title={_("El modelo de elevación cambió desde este cálculo")}>{_("desactualizado")}</span> : null}
+        {analysis.stale ?
+          <span className="road-badge stale"
+                title={_("El modelo de elevación cambió desde este cálculo")}>
+            {_("desactualizado")}
+          </span> : null}
       </div>
 
       {isRunning ?
@@ -229,8 +415,11 @@ export default class RoadPanel extends React.Component {
             <span>{(summary.length || 0).toFixed(0)} m</span>
             {summary.mean_width !== null && summary.mean_width !== undefined ?
               <span>{_("ancho medio")} {summary.mean_width.toFixed(2)} m</span> : null}
-            <span>{_("pendiente")} {(summary.min_grade || 0).toFixed(1)}% … {(summary.max_grade || 0).toFixed(1)}%</span>
+            <span>
+              {_("pendiente")} {(summary.min_grade || 0).toFixed(1)}% … {(summary.max_grade || 0).toFixed(1)}%
+            </span>
           </div>
+          {this.renderThresholds(analysis)}
           <div className="road-downloads">
             {_("Descargar:")}
             <a onClick={() => this.handleDownload(analysis, 'csv')}>CSV</a>
@@ -239,10 +428,15 @@ export default class RoadPanel extends React.Component {
         </div>
         : null}
 
-      {analysis.status === 'failed' ?
-        <div className="road-failed">{analysis.error}</div> : null}
+      {analysis.status === 'failed' ? <div className="road-failed">{analysis.error}</div> : null}
       {analysis.status === 'canceled' ?
         <div className="road-failed">{_("Cancelado.")}</div> : null}
+
+      {!isRunning ?
+        <div className="road-actions">
+          <a onClick={() => this.handleDelete(analysis)}>{_("Eliminar")}</a>
+        </div>
+        : null}
     </li>);
   }
 
@@ -257,12 +451,14 @@ export default class RoadPanel extends React.Component {
     return (<div className="road-legend">
       {entries.map(([color, label]) =>
         <span key={label}><i style={{background: color}} />{label}</span>)}
-      <span className="road-legend-note">{_("El trazo discontinuo marca los tramos sin ancho medido.")}</span>
+      <span className="road-legend-note">
+        {_("El trazo discontinuo marca los tramos sin ancho medido.")}
+      </span>
     </div>);
   }
 
   render(){
-    const { capabilities, analyses, loading, launching, selectedAxis, error } = this.state;
+    const { capabilities, analyses, loading, launching, selectedAxis, error, running } = this.state;
     const task = this.singleTask();
 
     return (<div className="road-panel">
@@ -273,9 +469,7 @@ export default class RoadPanel extends React.Component {
       <ErrorMessage bind={[this, "error"]} />
 
       {!task ?
-        <div className="road-notice">
-          {_("Abre una sola tarea para analizar su camino.")}
-        </div>
+        <div className="road-notice">{_("Abre una sola tarea para analizar su camino.")}</div>
         : loading ?
         <div className="road-notice">{_("Cargando…")}</div>
         : !capabilities ?
@@ -284,14 +478,17 @@ export default class RoadPanel extends React.Component {
         <div>
           {this.renderAxisSelector()}
           {this.renderModelSelector()}
+          {this.renderParams()}
 
           <button className="btn btn-sm btn-primary road-calculate"
-                  disabled={!selectedAxis || launching || !!this.state.running}
-                  onClick={this.handleCalculate}>
+                  disabled={!selectedAxis || launching || !!running}
+                  onClick={() => this.handleCalculate(false)}>
             {launching ? _("Lanzando…") : _("Calcular")}
           </button>
 
-          {this.state.running ?
+          {this.renderConfirm()}
+
+          {running ?
             <div className="road-notice">{_("Ya hay un análisis en curso en esta tarea.")}</div>
             : null}
 

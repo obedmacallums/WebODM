@@ -191,7 +191,23 @@ class AnalysisList(TaskView):
 
         estimate = compute.estimate(source['plan_length'], params)
 
-        analysis_id = str(uuid.uuid4())
+        # Un eje tiene como mucho un análisis en la tarea: relanzarlo **pisa** el anterior
+        # conservando su `id` y su `name` (FR-037). La confirmación existe porque sustituir es
+        # destructivo y porque un análisis muy caro merece un aviso antes de ocupar el worker
+        # — pero no hay tope que impida lanzarlo (FR-043).
+        existing = store.find_analysis_by_axis(str(task.id), source['kind'], source['ref'])
+        if not data.get('confirm'):
+            reason = ('replaces_existing' if existing is not None
+                      else 'costly' if estimate['warn'] else None)
+            if reason is not None:
+                return error(
+                    _('Este análisis sustituirá al que ya existe para ese eje.') if existing
+                    else _('El análisis es costoso: %(n)s muestras.') % {'n': estimate['samples']},
+                    ERR_CONFIRMATION_REQUIRED, status.HTTP_409_CONFLICT,
+                    reason=reason, estimate=estimate,
+                    existing_analysis_id=existing['id'] if existing else None)
+
+        analysis_id = existing['id'] if existing is not None else str(uuid.uuid4())
         acquired, running = store.acquire_running(str(task.id), analysis_id)
         if not acquired:
             return error(_('Ya hay un análisis en curso en esta tarea.'), ERR_ANALYSIS_RUNNING,
@@ -199,21 +215,33 @@ class AnalysisList(TaskView):
                          running_analysis_id=running.get('analysis_id'))
 
         try:
+            # El resultado anterior se descarta antes de empezar: si el nuevo cálculo falla o se
+            # cancela, dejar los tramos viejos bajo unos parámetros nuevos sería peor que no tener
+            # nada — el usuario los leería como si describieran lo que acaba de pedir.
+            if existing is not None:
+                store.delete_segments(str(task.id), analysis_id)
+
             analysis = {
                 'id': analysis_id,
-                'name': (data.get('name') or suggested_name or _('Camino'))[:255],
+                'name': str(data.get('name')
+                            or (existing or {}).get('name')
+                            or suggested_name or _('Camino'))[:255],
                 'axis': source,
                 'model': model,
                 'variant': variant,
                 'params': params,
-                'color_thresholds': list(sources.COLOR_THRESHOLDS_DEFAULT),
+                # Los umbrales del semáforo sobreviven al recálculo: son una preferencia de lectura
+                # del usuario, no un producto del cálculo, y devolverlos a los de fábrica cada vez
+                # que se afina un parámetro sería un paso atrás en cada iteración.
+                'color_thresholds': ((existing or {}).get('color_thresholds')
+                                     or list(sources.COLOR_THRESHOLDS_DEFAULT)),
                 'status': 'running',
                 'progress': 0.0,
                 'error': None,
                 'celery_task_id': None,
                 'source_mtime': sources.source_mtime(task, model, variant),
                 'summary': None,
-                'created_at': _now(),
+                'created_at': (existing or {}).get('created_at') or _now(),
                 'updated_at': _now(),
                 'created_by': request.user.id,
             }
@@ -246,8 +274,101 @@ class AnalysisList(TaskView):
                          'estimate': estimate}, status=status.HTTP_202_ACCEPTED)
 
 
+class AnalysisEstimate(TaskView):
+    """`POST task/<pk>/analyses/estimate`: cuánto costaría, sin lanzar nada (`research.md` D11).
+
+    El conteo es aritmética pura sobre la longitud del eje, así que responde de inmediato y sin
+    tocar el ráster. Existe porque la decisión de no poner tope duro (FR-043) obliga a darle al
+    usuario con qué decidir.
+    """
+
+    def post(self, request, pk=None):
+        task = self.get_and_check_task(request, pk)
+
+        data = request.data
+        model, variant, described, failure = _resolve_model_and_variant(task, data)
+        if failure is not None:
+            return failure
+
+        params, err = sources.validate_params(data.get('params'), described['resolution'])
+        if err:
+            return error(err, ERR_INVALID_PARAMETER)
+
+        source, _name, failure = _resolve_axis(task, data, described)
+        if failure is not None:
+            return failure
+
+        return Response(compute.estimate(source['plan_length'], params),
+                        status=status.HTTP_200_OK)
+
+
 class AnalysisDetail(TaskView):
-    """`GET task/<pk>/analyses/<analysis_id>`: el análisis con sus tramos."""
+    """`GET`/`PATCH`/`DELETE task/<pk>/analyses/<analysis_id>`."""
+
+    PATCHABLE = ('name', 'color_thresholds')
+
+    def patch(self, request, pk=None, analysis_id=None):
+        """Solo `name` y `color_thresholds`.
+
+        Cualquier otro campo se rechaza en vez de ignorarse: aceptar un `params` por aquí dejaría
+        un análisis cuyos parámetros ya no describen sus propios tramos, y nadie se enteraría.
+
+        `updated_at` **no se toca**: marca cuándo se calculó el resultado, y ni renombrar ni mover
+        los umbrales del semáforo recalculan nada (FR-030).
+        """
+        task = self.get_and_check_task(request, pk)
+        check_project_perms(request, task.project, ('change_project',))
+
+        analysis = store.get_analysis(str(task.id), analysis_id)
+        if analysis is None:
+            return error(_('El análisis no existe en esta tarea.'), ERR_NOT_FOUND,
+                         status.HTTP_404_NOT_FOUND)
+
+        unknown = [k for k in request.data if k not in self.PATCHABLE]
+        if unknown:
+            return error(
+                _('Solo se pueden modificar %(allowed)s. Recibido: %(got)s.') % {
+                    'allowed': ', '.join(self.PATCHABLE), 'got': ', '.join(sorted(unknown))},
+                ERR_INVALID_PARAMETER)
+
+        changes = {}
+        if 'name' in request.data:
+            name = str(request.data['name'] or '').strip()
+            if not name:
+                return error(_('El nombre no puede estar vacío.'), ERR_INVALID_PARAMETER)
+            changes['name'] = name[:255]
+
+        if 'color_thresholds' in request.data:
+            thresholds, err = sources.validate_color_thresholds(request.data['color_thresholds'])
+            if err:
+                return error(err, ERR_INVALID_PARAMETER)
+            changes['color_thresholds'] = thresholds
+
+        def mutate(a):
+            a.update(changes)
+            return a
+
+        updated = store.update_analysis(str(task.id), analysis_id, mutate)
+        return Response(_analysis_response(task, updated), status=status.HTTP_200_OK)
+
+    def delete(self, request, pk=None, analysis_id=None):
+        task = self.get_and_check_task(request, pk)
+        check_project_perms(request, task.project, ('change_project',))
+
+        analysis = store.get_analysis(str(task.id), analysis_id)
+        if analysis is None:
+            return error(_('El análisis no existe en esta tarea.'), ERR_NOT_FOUND,
+                         status.HTTP_404_NOT_FOUND)
+
+        # Cancelar antes de borrar: un worker vivo volvería a escribir el archivo de tramos justo
+        # detrás, y el candado quedaría tomado sobre un análisis que ya no existe.
+        if analysis.get('status') == 'running':
+            cancel_analysis(task, analysis)
+
+        store.delete_segments(str(task.id), analysis_id)
+        store.remove_analysis(str(task.id), analysis_id)
+        store.release_running(str(task.id), analysis_id)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     def get(self, request, pk=None, analysis_id=None):
         task = self.get_and_check_task(request, pk)

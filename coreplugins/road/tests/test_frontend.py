@@ -37,3 +37,6 @@ class FrontendUnitTest(SimpleTestCase):
 
     def test_road_bridge_coexists_on_the_core_bus(self):
         self._run_js('roadBridge.test.js')
+
+    def test_threshold_recolor_is_local_and_complete(self):
+        self._run_js('thresholdRecolor.test.js')

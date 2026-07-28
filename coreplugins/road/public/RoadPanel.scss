@@ -141,6 +141,62 @@
     }
   }
 
+  .road-params{
+    margin-bottom: 8px;
+
+    .road-range{
+      font-size: 11px;
+      color: #888;
+    }
+
+    input.form-control{
+      height: 26px;
+      padding: 2px 6px;
+    }
+  }
+
+  .road-confirm{
+    border: 1px solid #f0ad4e;
+    background: #fcf8e3;
+    padding: 6px;
+    margin-top: 6px;
+    font-size: 12px;
+
+    p{ margin: 0 0 4px 0; }
+
+    .road-estimate{ color: #666; }
+
+    .btn{ margin-right: 4px; }
+  }
+
+  .road-thresholds{
+    margin-top: 4px;
+
+    label{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: normal;
+      margin: 0;
+
+      input[type="range"]{
+        flex: 1;
+        margin: 0;
+      }
+
+      span{
+        width: 38px;
+        text-align: right;
+      }
+    }
+  }
+
+  .road-actions{
+    font-size: 12px;
+    margin-top: 2px;
+  }
+
   .road-downloads{
     font-size: 12px;
     color: #666;

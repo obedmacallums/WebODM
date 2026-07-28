@@ -32,6 +32,10 @@ MAX_WINDOW_PIXELS = 4_000_000
 # calibrada, no una medida universal: se recalibra midiendo un análisis real (T055).
 SAMPLES_PER_SECOND = 250_000.0
 
+# A partir de aquí la creación pide confirmación explícita. **No es un tope**: sin `confirm` se
+# responde 409 con la estimación, y con `confirm: true` se lanza igual (FR-043).
+WARN_SAMPLES = 2_000_000
+
 STATUS_MEASURED = 'measured'
 STATUS_NO_EDGE = 'no_edge'
 STATUS_NO_COVERAGE = 'no_coverage'
@@ -397,6 +401,7 @@ def estimate(plan_length, params):
         'cross_sections': segments,
         'samples': samples,
         'estimated_seconds': samples / SAMPLES_PER_SECOND,
+        'warn': samples > WARN_SAMPLES,
     }
 
 
