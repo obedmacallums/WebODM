@@ -11,13 +11,23 @@ const POLL_INTERVAL = 1500;
 // el deslizador. Sin esto, arrastrarlo dispara una petición por píxel movido.
 const THRESHOLD_SAVE_DELAY = 600;
 
+// El tercer elemento restringe el campo a un modo de detección: `break_threshold` solo tiene
+// sentido buscando quiebres y `surface_tolerance` solo buscando separación. Mostrar el que no
+// aplica sería una opción muerta, que es justo lo que `capabilities` existe para evitar.
 const PARAM_FIELDS = [
-  ['segment_length', () => _("Longitud de tramo (m)")],
-  ['search_half_width', () => _("Semiancho de búsqueda (m)")],
-  ['sample_step', () => _("Paso de muestreo (m)")],
-  ['break_threshold', () => _("Umbral de quiebre (%)")],
-  ['min_consecutive_samples', () => _("Muestras seguidas para el quiebre")]
+  ['segment_length', () => _("Longitud de tramo (m)"), null],
+  ['search_half_width', () => _("Semiancho de búsqueda (m)"), null],
+  ['sample_step', () => _("Paso de muestreo (m)"), null],
+  ['break_threshold', () => _("Umbral de quiebre (%)"), 'break'],
+  ['surface_tolerance', () => _("Tolerancia de separación (m)"), 'surface'],
+  ['min_consecutive_samples', () => _("Muestras seguidas para confirmar el borde"), null],
+  ['coherence_window', () => _("Ventana de coherencia (tramos, 0 = sin reparar)"), null]
 ];
+
+const EDGE_MODE_LABELS = {
+  break: () => _("Quiebre de pendiente — talud o cuneta (camino)"),
+  surface: () => _("Separación de la calzada — bordillo (calle)")
+};
 
 export default class RoadPanel extends React.Component {
   static propTypes = {
@@ -152,6 +162,17 @@ export default class RoadPanel extends React.Component {
     if (group && group !== true) bridge.unpublishAnalysis(group);
     delete this._published[analysis.id];
     this.publish(analysis);
+  }
+
+  // Al pasar a `surface` se propone una ventana de coherencia de 2 si el usuario no la había
+  // tocado: es el ajuste con el que el modo rinde en calle. Conveniencia de interfaz, no regla
+  // del servidor (`006` FR-030) — el usuario puede volver a ponerla a 0.
+  handleEdgeModeChange(mode){
+    const params = Object.assign({}, this.state.params, {edge_mode: mode});
+    const defaults = (this.state.capabilities || {}).defaults || {};
+    const untouched = Number(params.coherence_window) === Number(defaults.coherence_window || 0);
+    if (mode === 'surface' && untouched) params.coherence_window = 2;
+    this.setState({params});
   }
 
   // --- Lanzar, recalcular, cancelar, borrar ----------------------------------------------
@@ -370,13 +391,26 @@ export default class RoadPanel extends React.Component {
 
       {showParams ?
         <div>
-          {PARAM_FIELDS.map(([key, label]) => {
+          <div className="form-group">
+            <label>{_("Criterio de borde")}</label>
+            <select className="form-control"
+                    value={params.edge_mode || 'break'}
+                    onChange={e => this.handleEdgeModeChange(e.target.value)}>
+              {(capabilities.edge_modes || ['break']).map(mode =>
+                <option key={mode} value={mode}>
+                  {EDGE_MODE_LABELS[mode] ? EDGE_MODE_LABELS[mode]() : mode}
+                </option>)}
+            </select>
+          </div>
+          {PARAM_FIELDS.map(([key, label, onlyMode]) => {
+            if (onlyMode && onlyMode !== (params.edge_mode || 'break')) return null;
             const [low, high] = ranges[key] || [];
+            const integer = key === 'min_consecutive_samples' || key === 'coherence_window';
             return (<div className="form-group" key={key}>
               <label>{label()}</label>
               <input type="number" className="form-control"
                      min={low} max={high}
-                     step={key === 'min_consecutive_samples' ? 1 : 0.05}
+                     step={integer ? 1 : 0.05}
                      value={params[key] !== undefined ? params[key] : ''}
                      onChange={e => this.setState({
                        params: Object.assign({}, params, {[key]: e.target.value})

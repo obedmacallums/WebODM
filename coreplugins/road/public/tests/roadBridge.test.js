@@ -195,6 +195,25 @@ test('el popup lleva las cuatro métricas del tramo', () => {
   assert.ok(html.includes('8.00 m'), 'el ancho medido debe aparecer');
 });
 
+test('el popup marca el lado inferido sin borrar el motivo', () => {
+  // `006` FR-031 y FR-020: la distancia existe Y el motivo original se conserva. Las dos cosas
+  // se muestran juntas — "no se pudo medir aquí, el valor viene de los vecinos".
+  const html = bridge.popupHtml(segment(0, {
+    status: 'inferred', width: 9.8, offset_left: 4.0, offset_right: 5.8,
+    left_edge_source: 'measured', right_edge_source: 'inferred',
+    right_reason: 'no_break'
+  }));
+
+  assert.ok(html.includes('5.80 m'), 'la distancia inferida se muestra');
+  assert.ok(html.includes('inferido'), 'y se declara como inferida');
+  assert.ok(html.includes('sin quiebre'), 'el motivo original la acompaña');
+  assert.ok(!/4\.00 m[^<]*inferido/.test(html), 'el lado medido no lleva la marca');
+});
+
+test('un tramo medido no lleva ninguna marca de inferido', () => {
+  assert.ok(!bridge.popupHtml(segment(0)).includes('inferido'));
+});
+
 test('un tramo sin borde muestra el motivo por lado, no un ancho inventado', () => {
   const html = bridge.popupHtml(segment(0, {
     status: 'no_edge', width: null, cross_slope: null,

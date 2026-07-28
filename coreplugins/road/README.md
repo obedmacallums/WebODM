@@ -18,10 +18,23 @@ Documentación completa de diseño en [`specs/005-road-metrics/`](../../specs/00
   funcionando.
 - **Tramificación por progresiva**: el eje se corta cada `segment_length` metros (5 m por defecto);
   el último tramo conserva su longitud real.
-- **Bordes por quiebre de pendiente**: en el punto medio de cada tramo se recorre una transversal
-  perpendicular hacia cada lado hasta `search_half_width`, y el borde es el arranque de la primera
-  racha sostenida de pendiente por encima de `break_threshold`. Cuando no hay borde se dice por qué,
-  por lado: `no_break` (se recorrió todo sin quiebre) o `no_data` (el DEM se quedó sin dato).
+- **Bordes con dos criterios a elegir** (`edge_mode`): en el punto medio de cada tramo se recorre
+  una transversal perpendicular hacia cada lado hasta `search_half_width`, y el borde es…
+  - `break` (defecto): el arranque de la primera racha sostenida de pendiente local por encima de
+    `break_threshold`. Busca **lo afilado**: talud, cuneta, berma. Es el criterio para caminos.
+  - `surface`: el primer punto que se aparta más de `surface_tolerance` de una recta ajustada a la
+    propia calzada, y se mantiene apartado. Busca **lo alto**: bordillo, acera. Es el criterio para
+    calles, donde la fotogrametría difumina el escalón en una rampa suave que el quiebre no ve y el
+    ruido produce picos más afilados que el propio bordillo. El ajuste absorbe el peralte y se
+    rehace entre los bordes provisionales, así que tolera un eje descentrado.
+
+  Cuando no hay borde se dice por qué, por lado, con los mismos tres motivos en ambos modos.
+- **Coherencia entre tramos** (`coherence_window`, apagada por defecto): el borde de una calle es
+  una línea continua, y esta pasada lo usa — repara atípicos y huecos cortos con la mediana de la
+  vecindad, **declarando cada reparación**: el origen de cada borde (`measured` | `inferred`) viaja
+  en el tramo, el popup y la exportación. Solo los bordes medidos votan, así que un descampado de
+  diez tramos jamás se rellena. Los tramos con algún borde inferido llevan estado `inferred` y
+  trazo propio en el mapa.
 - **Pendientes por mínimos cuadrados**, no por diferencia de extremos: la longitudinal sobre todas
   las muestras del eje del tramo, la transversal sobre las muestras entre bordes.
 - **Nada se rellena**: una métrica que no se pudo medir viaja vacía, nunca interpolada ni a cero.
@@ -40,8 +53,11 @@ Documentación completa de diseño en [`specs/005-road-metrics/`](../../specs/00
 | `segment_length` | m | 5,0 | 0,5 – 100 | cada cuánto se corta el eje |
 | `search_half_width` | m | 10,0 | 1 – 50 | hasta dónde se busca el borde a cada lado |
 | `sample_step` | m | `max(resolución, 0,1)` | resolución – 5 | separación entre muestras |
-| `break_threshold` | % | 15,0 | 2 – 200 | pendiente local que cuenta como quiebre |
-| `min_consecutive_samples` | muestras | 3 | 1 – 20 | longitud mínima de la racha de quiebre |
+| `break_threshold` | % | 15,0 | 2 – 200 | pendiente local que cuenta como quiebre (solo `break`) |
+| `min_consecutive_samples` | muestras | 3 | 1 – 20 | longitud mínima de la racha que confirma el borde (ambos modos) |
+| `edge_mode` | — | `break` | `break` \| `surface` | criterio de borde |
+| `surface_tolerance` | m | 0,06 | 0,02 – 0,5 | separación de la calzada que cuenta como borde (solo `surface`) |
+| `coherence_window` | tramos | 0 | 0 – 5 | vecinos a cada lado para reparar atípicos y huecos (0 = apagada) |
 
 El suelo de `sample_step` es la **resolución del ráster**, no una constante: muestrear más fino que
 el píxel inventa detalle que no existe. Y `segment_length` nunca puede ser menor que `sample_step`,
@@ -76,9 +92,17 @@ corresponde a ningún renderer, antes de ejecutar la vista.
 
 | Motivo | Qué ocurrió | Qué suele significar |
 |---|---|---|
-| `no_break` | se recorrió todo el semiancho sin quiebre | el camino se funde con el terreno |
+| `no_break` | se recorrió todo el semiancho sin quiebre (o sin separación, en `surface`) | el camino se funde con el terreno |
 | `no_data` | el DEM se quedó sin dato | el recorrido llegó al borde del vuelo |
-| `break_at_axis` | el quiebre arranca sobre el propio eje | el eje no pasa por la calzada ahí |
+| `break_at_axis` | el quiebre (o la separación) arranca sobre el propio eje | el eje no pasa por la calzada ahí |
+
+El motivo dice por qué no hay borde **medido**; con la coherencia activada, un lado puede llevar a
+la vez su motivo y una distancia inferida de los vecinos — "no se pudo medir aquí, el valor viene
+de al lado". El límite conocido del modo `surface`, documentado y no resuelto: una calzada que se
+hunde suavemente hacia una cuneta sin escalón nunca se aparta de su propia referencia y sale
+`no_break` donde el modo `break` sí acierta — por eso `break` sigue siendo el defecto. Y al revés,
+en terreno rural el modo `surface` corta en el primer resalte de 6 cm (rodera, montículo), midiendo
+la franja plana y no la calzada entera: los dos criterios responden preguntas distintas.
 
 ## Almacenamiento
 

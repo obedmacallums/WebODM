@@ -78,6 +78,21 @@ test('un tramo sin cobertura va gris y discontinuo', () => {
   assert.ok(s.dashArray);
 });
 
+test('un tramo inferido se distingue del medido y del sin-ancho a la vez', () => {
+  // `006` FR-032: tiene ancho —peso y color de tramo completo— pero no todo se midió aquí, y
+  // eso debe verse sin abrir el popup. Su raya es distinta de la del no_edge.
+  const inferred = style.styleForSegment({status: 'inferred', grade: 3}, THRESHOLDS);
+  const measured = style.styleForSegment({status: 'measured', grade: 3}, THRESHOLDS);
+  const noEdge = style.styleForSegment({status: 'no_edge', grade: 3}, THRESHOLDS);
+
+  assert.strictEqual(inferred.color, palette.ok, 'el semáforo no cambia por el origen');
+  assert.strictEqual(inferred.weight, measured.weight, 'peso de tramo con ancho');
+  assert.ok(inferred.dashArray, 'algo debe marcar que no todo se midió aquí');
+  assert.notStrictEqual(inferred.dashArray, noEdge.dashArray,
+    'con la misma raya que un no_edge, un ancho inferido pasaría por ausente');
+  assert.strictEqual(measured.dashArray, null);
+});
+
 // --- Área de captura del cursor ------------------------------------------------------------------
 
 test('el área de captura es invisible, ancha y continua', () => {

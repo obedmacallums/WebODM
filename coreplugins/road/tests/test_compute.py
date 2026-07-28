@@ -21,21 +21,32 @@ PARAMS = {
 
 
 def assert_segment_invariants(case, segment):
-    """Coherencia obligatoria de `data-model.md` §6, verificable en todos los tramos."""
+    """Coherencia obligatoria de `data-model.md` §6 de `006`, verificable en todos los tramos."""
     status = segment['status']
     measured = ('width', 'offset_left', 'offset_right', 'cross_slope')
+    sources = (segment['left_edge_source'], segment['right_edge_source'])
 
     if status == 'measured':
         for field in measured:
             case.assertIsNotNone(segment[field], '{} vacío en un tramo measured'.format(field))
         case.assertIsNone(segment['left_reason'])
         case.assertIsNone(segment['right_reason'])
+        case.assertEqual(sources, ('measured', 'measured'))
+        case.assertAlmostEqual(segment['width'],
+                               segment['offset_left'] + segment['offset_right'], places=9)
+    elif status == 'inferred':
+        # Hay ancho ⟺ hay dos bordes, sea cual sea su origen; el estado declara que al menos
+        # uno es deducido (`006` FR-021, FR-022).
+        for field in measured:
+            case.assertIsNotNone(segment[field], '{} vacío en un tramo inferred'.format(field))
+        case.assertIn('inferred', sources)
         case.assertAlmostEqual(segment['width'],
                                segment['offset_left'] + segment['offset_right'], places=9)
     elif status == 'no_edge':
         case.assertIsNone(segment['width'])
         case.assertIsNone(segment['cross_slope'])
         case.assertTrue(segment['left_reason'] or segment['right_reason'])
+        case.assertIn(None, sources)
     elif status == 'no_coverage':
         case.assertIsNone(segment['elevation'])
         case.assertIsNone(segment['grade'])
@@ -43,12 +54,16 @@ def assert_segment_invariants(case, segment):
     else:
         case.fail('status desconocido: {}'.format(status))
 
-    # El lado con borde conserva su distancia aunque el otro no lo tenga.
     for side in ('left', 'right'):
+        offset = segment['offset_{}'.format(side)]
+        source = segment['{}_edge_source'.format(side)]
+        # Origen nulo ⟺ distancia nula: no hay borde sin origen ni origen sin borde.
+        case.assertEqual(offset is None, source is None,
+                         'offset y edge_source inconsistentes en el lado {}'.format(side))
+        # El lado sin motivo tiene borde (posiblemente sustituido); el motivo, en cambio, ya no
+        # implica ausencia de distancia: puede convivir con un valor inferido (`006` FR-020).
         if segment['{}_reason'.format(side)] is None and status != 'no_coverage':
-            case.assertIsNotNone(segment['offset_{}'.format(side)])
-        else:
-            case.assertIsNone(segment['offset_{}'.format(side)])
+            case.assertIsNotNone(offset)
 
     case.assertEqual(len(segment['cross_section']), 2)
     case.assertGreaterEqual(len(segment['geometry']), 2)
@@ -99,6 +114,37 @@ class PipelineTest(ComputeTestBase):
             self.assertAlmostEqual(segment['offset_right'], 5.5, places=6)
             self.assertAlmostEqual(segment['width'], 8.5, places=6)
 
+    def test_surface_mode_measures_where_break_mode_cannot(self):
+        # Un "talud" del 10 % es la rampa en que la fotogrametría convierte un bordillo (`006`
+        # D17): por debajo del umbral de quiebre (15 %), pero acumulando separación respecto del
+        # plano de calzada. El modo de quiebre no ve nada; el de superficie mide.
+        street = {'talud': 0.10}
+
+        broke = self._analyze(dem_kwargs=street)['segments']
+        self.assertTrue(all(s['status'] == 'no_edge' for s in broke))
+
+        surfaced = self._analyze(dem_kwargs=street,
+                                 params={'edge_mode': 'surface',
+                                         'surface_tolerance': 0.06})['segments']
+        for segment in surfaced:
+            self.assertEqual(segment['status'], 'measured')
+            # El borde cae dentro de la rampa, donde la separación supera la tolerancia:
+            # entre el pie del bordillo (8 m de calzada) y tolerancia/pendiente más la racha.
+            self.assertGreaterEqual(segment['width'], 8.0 - 2 * DEM_RES)
+            self.assertLessEqual(segment['width'], 8.0 + 2 * (0.06 / 0.10 + 2 * DEM_RES))
+            # D19: el bombeo sale de la referencia ajustada y recupera el peralte conocido.
+            self.assertAlmostEqual(segment['cross_slope'], 2.0, delta=0.15)
+            assert_segment_invariants(self, segment)
+
+    def test_surface_mode_matches_break_mode_on_the_rural_road(self):
+        # Sobre el camino rural sintético (talud del 50 %) los dos criterios deben coincidir:
+        # es la medición en pequeño de la pregunta que D24 deja abierta.
+        surfaced = self._analyze(params={'edge_mode': 'surface',
+                                         'surface_tolerance': 0.06})['segments']
+        for segment in surfaced:
+            self.assertEqual(segment['status'], 'measured')
+            self.assertAlmostEqual(segment['width'], 8.0, delta=2 * DEM_RES + 0.06 / 0.50)
+
     def test_road_without_taludes_is_no_edge_with_a_reason_per_side(self):
         segments = self._analyze(dem_kwargs={'talud': 0.0, 'cross_slope': 0.0})['segments']
 
@@ -141,6 +187,44 @@ class PipelineTest(ComputeTestBase):
             with self.subTest(dem=dem_kwargs):
                 for segment in self._analyze(dem_kwargs=dem_kwargs)['segments']:
                     assert_segment_invariants(self, segment)
+
+    def test_coherence_fills_a_short_gap_and_declares_it(self):
+        # Parche de nodata SOLO sobre el lado izquierdo entre las progresivas 40 y 45: ese tramo
+        # sale no_edge/no_data por la izquierda mientras sus vecinos miden 4,0 m. Con ventana 2 la
+        # coherencia lo rellena, lo marca y conserva el motivo original (`006` FR-015, FR-020).
+        patch = {'nodata_patch': (200, 220, 244, 270)}   # progresivas 40-45, este del eje (izquierda)
+
+        plain = self._analyze(dem_kwargs=patch)['segments']
+        holes = [s for s in plain if s['status'] == 'no_edge']
+        self.assertEqual(len(holes), 1)
+        self.assertEqual(holes[0]['left_reason'], 'no_data')
+        hole_index = holes[0]['index']
+
+        repaired = self._analyze(dem_kwargs=patch,
+                                 params={'coherence_window': 2})['segments']
+        fixed = repaired[hole_index]
+
+        self.assertEqual(fixed['status'], 'inferred')
+        self.assertEqual(fixed['left_edge_source'], 'inferred')
+        self.assertEqual(fixed['right_edge_source'], 'measured')
+        self.assertEqual(fixed['left_reason'], 'no_data')      # el motivo no se borra
+        self.assertAlmostEqual(fixed['offset_left'], 4.0, delta=0.1)
+        self.assertAlmostEqual(fixed['width'], 8.0, delta=0.15)
+        self.assertIsNotNone(fixed['cross_slope'])
+        self.assertIsNotNone(fixed['edge_left'], 'el punto de borde inferido también se emite')
+        for segment in repaired:
+            assert_segment_invariants(self, segment)
+        # Y los demás tramos no se contagian: siguen medidos e intactos.
+        untouched = [s for s in repaired if s['index'] != hole_index]
+        self.assertTrue(all(s['status'] == 'measured' for s in untouched))
+
+    def test_window_zero_changes_nothing_in_the_pipeline(self):
+        # FR-012 de punta a punta: el mismo análisis con y sin el parámetro explícito.
+        patch = {'nodata_patch': (200, 220, 244, 270)}
+        plain = self._analyze(dem_kwargs=patch)['segments']
+        explicit = self._analyze(dem_kwargs=patch, params={'coherence_window': 0})['segments']
+
+        self.assertEqual(plain, explicit)
 
     def test_geometry_and_midpoint_come_back_in_wgs84(self):
         segment = self._analyze()['segments'][0]

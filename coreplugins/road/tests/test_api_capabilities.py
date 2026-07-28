@@ -50,6 +50,21 @@ class CapabilitiesTest(RoadTestBase):
         self.assertEqual(res.data['defaults']['color_thresholds'], [8.0, 12.0])
         self.assertEqual(res.data['ranges']['segment_length'], [0.5, 100.0])
 
+    def test_capabilities_publish_the_edge_mode_and_its_companions(self):
+        # El panel no codifica ninguno de estos valores: los lee de aquí (`006` FR-026). El enum
+        # va aparte de `ranges` porque no es un intervalo y se dibuja como selector.
+        task = self._task_with_dem()
+        self._login()
+
+        res = self.client.get(self._url(task, 'capabilities'))
+
+        self.assertEqual(res.data['edge_modes'], ['break', 'surface'])
+        self.assertEqual(res.data['defaults']['edge_mode'], 'break')
+        self.assertEqual(res.data['defaults']['surface_tolerance'], 0.06)
+        self.assertEqual(res.data['defaults']['coherence_window'], 0)
+        self.assertEqual(res.data['ranges']['surface_tolerance'], [0.02, 0.5])
+        self.assertEqual(res.data['ranges']['coherence_window'], [0, 5])
+
     def test_only_the_original_variant_without_realign(self):
         task = self._task_with_dem()
         self._login()

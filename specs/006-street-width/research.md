@@ -273,3 +273,15 @@ el mismo que produjo las mediciones de D17. Está recogido como escenario opcion
   Se deja constancia de la decisión y de su coste para que revisarla más adelante sea barato.
 - *Sustituir el detector sin medir*: apostaría a ciegas sobre análisis rurales ya validados y
   entregados.
+
+**Resolución (2026-07-28, tras implementar)**: la medición pendiente se hizo sobre los dos rurales
+reales, y la deuda queda saldada **a favor de los dos modos**. En rural los criterios no miden lo
+mismo: `surface` encuentra "borde" en el 100 % de los tramos —corta en el primer resalte que
+acumula 6 cm: rodera, montículo, matorral— y sus anchos difieren de los del talud en ~2 m de media
+(máximos de 8–9,6 m). Mide la *franja plana*, no la calzada delimitada por taludes. Unificar
+cambiaría sustancialmente resultados ya entregados, que es justo lo que FR-002 prohíbe. Detalle en
+[validacion-manual.md](./validacion-manual.md).
+
+La hipótesis concreta que sostenía la duda —"una cuneta suave sin escalón daría `no_break` donde el
+quiebre acierta"— resultó ser la dirección equivocada: el fallo rural de `surface` no es medir de
+menos sino medir *otra cosa*.

@@ -14,6 +14,63 @@ from .base import axis_vertices
 from .test_api_analyses import AXIS_REF, AnalysesApiTestBase
 
 
+class PreFeatureDocumentTest(AnalysesApiTestBase):
+    """Un análisis guardado antes de `006-street-width` se lee sin migración (FR-024)."""
+
+    OLD_DOC = {
+        'version': store.SCHEMA_VERSION,
+        'analysis_id': 'old-1',
+        'segments': [
+            {'index': 0, 'status': 'measured', 'offset_left': 4.0, 'offset_right': 4.0,
+             'width': 8.0, 'left_reason': None, 'right_reason': None},
+            {'index': 1, 'status': 'no_edge', 'offset_left': 4.0, 'offset_right': None,
+             'width': None, 'left_reason': None, 'right_reason': 'no_break'},
+        ],
+    }
+
+    def test_missing_edge_sources_are_completed_as_measured_on_read(self):
+        task_id = 'compat-task'
+        store.write_segments(task_id, 'old-1', self.OLD_DOC)
+        self.addCleanup(store.delete_task_segments, task_id)
+
+        document = store.read_segments(task_id, 'old-1')
+        first, second = document['segments']
+
+        self.assertEqual(first['left_edge_source'], 'measured')
+        self.assertEqual(first['right_edge_source'], 'measured')
+        self.assertEqual(second['left_edge_source'], 'measured')   # el lado que sí tiene borde
+        self.assertIsNone(second['right_edge_source'])             # el que no, sin origen
+
+    def test_the_completion_happens_in_memory_not_on_disk(self):
+        # Sin migración de verdad: el archivo queda byte a byte como se escribió.
+        task_id = 'compat-task-2'
+        store.write_segments(task_id, 'old-1', self.OLD_DOC)
+        self.addCleanup(store.delete_task_segments, task_id)
+        with open(store.segments_path(task_id, 'old-1')) as f:
+            before = f.read()
+
+        store.read_segments(task_id, 'old-1')
+
+        with open(store.segments_path(task_id, 'old-1')) as f:
+            self.assertEqual(f.read(), before)
+        self.assertNotIn('edge_source', before)
+
+    def test_a_document_with_sources_is_left_untouched(self):
+        # Uno nuevo, con `inferred`, no debe "corregirse" a measured al releerlo.
+        task_id = 'compat-task-3'
+        doc = {'version': store.SCHEMA_VERSION, 'analysis_id': 'new-1', 'segments': [
+            {'index': 0, 'status': 'inferred', 'offset_left': 4.0, 'offset_right': 5.8,
+             'width': 9.8, 'left_edge_source': 'measured', 'right_edge_source': 'inferred',
+             'left_reason': None, 'right_reason': 'no_break'},
+        ]}
+        store.write_segments(task_id, 'new-1', doc)
+        self.addCleanup(store.delete_task_segments, task_id)
+
+        segment = store.read_segments(task_id, 'new-1')['segments'][0]
+
+        self.assertEqual(segment['right_edge_source'], 'inferred')
+
+
 class PatchTest(AnalysesApiTestBase):
     def _analysis(self, task):
         return self._create(task).data['analysis_id']

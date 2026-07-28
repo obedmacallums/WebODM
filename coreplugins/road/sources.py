@@ -22,6 +22,12 @@ VARIANT_REALIGNED = 'realigned'
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 
+# Criterios de detección de borde (`006` FR-001). `break` es el original de D3 y el defecto:
+# debe producir resultados idénticos a los de antes de existir esta elección (FR-002).
+EDGE_MODE_BREAK = 'break'
+EDGE_MODE_SURFACE = 'surface'
+EDGE_MODES = (EDGE_MODE_BREAK, EDGE_MODE_SURFACE)
+
 # `data-model.md` §4. El defecto de `sample_step` no está aquí porque depende de la resolución del
 # DEM: se resuelve en `defaults_for()`.
 DEFAULTS = {
@@ -29,6 +35,13 @@ DEFAULTS = {
     'search_half_width': 10.0,
     'break_threshold': 15.0,
     'min_consecutive_samples': 3,
+    'edge_mode': EDGE_MODE_BREAK,
+    # Solo lo usa el modo `surface`, pero se acepta y persiste también en `break` para que cambiar
+    # de modo sobre un análisis existente no pierda el valor ya ajustado (`006` data-model §4).
+    'surface_tolerance': 0.06,
+    # 0 = pasada de coherencia desactivada: es lo que garantiza que ningún análisis existente
+    # cambie de resultado (`006` FR-012).
+    'coherence_window': 0,
 }
 COLOR_THRESHOLDS_DEFAULT = [8.0, 12.0]
 
@@ -38,6 +51,8 @@ RANGES = {
     'sample_step': (None, 5.0),          # el mínimo es la resolución del DEM
     'break_threshold': (2.0, 200.0),
     'min_consecutive_samples': (1, 20),
+    'surface_tolerance': (0.02, 0.50),
+    'coherence_window': (0, 5),
 }
 
 MIN_SAMPLE_STEP = 0.1
@@ -195,7 +210,8 @@ def validate_params(params, resolution):
     resolved = defaults_for(resolution)
     ranges = ranges_for(resolution)
 
-    for key in ('segment_length', 'search_half_width', 'sample_step', 'break_threshold'):
+    for key in ('segment_length', 'search_half_width', 'sample_step', 'break_threshold',
+                'surface_tolerance'):
         if params.get(key) is None:
             continue
         try:
@@ -208,16 +224,25 @@ def validate_params(params, resolution):
                 'key': key, 'low': round(low, 4), 'high': high}
         resolved[key] = value
 
-    if params.get('min_consecutive_samples') is not None:
+    for key in ('min_consecutive_samples', 'coherence_window'):
+        if params.get(key) is None:
+            continue
         try:
-            value = int(params['min_consecutive_samples'])
+            value = int(params[key])
         except (TypeError, ValueError):
-            return None, _('min_consecutive_samples debe ser un número entero.')
-        low, high = ranges['min_consecutive_samples']
+            return None, _('%(key)s debe ser un número entero.') % {'key': key}
+        low, high = ranges[key]
         if not (low <= value <= high):
-            return None, _('min_consecutive_samples debe estar entre %(low)s y %(high)s.') % {
-                'low': low, 'high': high}
-        resolved['min_consecutive_samples'] = value
+            return None, _('%(key)s debe estar entre %(low)s y %(high)s.') % {
+                'key': key, 'low': low, 'high': high}
+        resolved[key] = value
+
+    # Enum, no rango: el mensaje enumera los valores admitidos (`006` FR-004).
+    if params.get('edge_mode') is not None:
+        if params['edge_mode'] not in EDGE_MODES:
+            return None, _('edge_mode debe ser uno de: %(modes)s.') % {
+                'modes': ', '.join(EDGE_MODES)}
+        resolved['edge_mode'] = params['edge_mode']
 
     resolved.pop('color_thresholds', None)
 

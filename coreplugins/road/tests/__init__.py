@@ -16,6 +16,8 @@ Etiqueta de ejecución: `webodm.sh test backend coreplugins.road.tests`.
 from .test_plugin import *            # noqa: F401,F403
 from .test_geometry import *          # noqa: F401,F403
 from .test_profile import *           # noqa: F401,F403
+from .test_surface import *           # noqa: F401,F403
+from .test_coherence import *         # noqa: F401,F403
 from .test_api_capabilities import *  # noqa: F401,F403
 from .test_axis import *              # noqa: F401,F403
 from .test_compute import *           # noqa: F401,F403

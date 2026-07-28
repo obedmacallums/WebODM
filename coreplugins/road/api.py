@@ -201,6 +201,9 @@ class Capabilities(TaskView):
                                               described['unit_factor']),
             'defaults': sources.defaults_for(resolution),
             'ranges': sources.ranges_for(resolution),
+            # Aparte de `ranges` porque es un enum, no un intervalo: el panel dibuja un selector,
+            # no un deslizador (`006` contracts/rest-api-delta.md).
+            'edge_modes': list(sources.EDGE_MODES),
             'max_vertices': geometry.MAX_VERTICES,
             'max_upload_bytes': sources.MAX_UPLOAD_BYTES,
         }, status=status.HTTP_200_OK)

@@ -34,12 +34,49 @@ class ValidateParamsTest(RoadTestBase):
         self.assertEqual(params['break_threshold'], 22.0)
         self.assertEqual(params['segment_length'], 5.0)
 
+    def test_the_new_edge_parameters_default_to_the_previous_behavior(self):
+        # `break` con coherencia apagada ES el comportamiento anterior: los defectos de los tres
+        # parámetros nuevos no pueden cambiar ningún resultado existente (`006` FR-002, FR-012).
+        params, err = sources.validate_params({}, DEM_RES)
+
+        self.assertIsNone(err)
+        self.assertEqual(params['edge_mode'], 'break')
+        self.assertEqual(params['surface_tolerance'], 0.06)
+        self.assertEqual(params['coherence_window'], 0)
+
+    def test_an_unknown_edge_mode_lists_the_valid_ones(self):
+        # Enum, no rango: el mensaje enumera los valores admitidos (`006` FR-004).
+        params, err = sources.validate_params({'edge_mode': 'laser'}, DEM_RES)
+
+        self.assertIsNone(params)
+        self.assertIn('edge_mode', str(err))
+        self.assertIn('break', str(err))
+        self.assertIn('surface', str(err))
+
+    def test_surface_mode_is_accepted_and_persists_its_tolerance(self):
+        params, err = sources.validate_params(
+            {'edge_mode': 'surface', 'surface_tolerance': 0.10, 'coherence_window': 2}, DEM_RES)
+
+        self.assertIsNone(err)
+        self.assertEqual(params['edge_mode'], 'surface')
+        self.assertEqual(params['surface_tolerance'], 0.10)
+        self.assertEqual(params['coherence_window'], 2)
+
+    def test_a_fractional_window_truncates_like_the_other_integer_params(self):
+        # Mismo trato que min_consecutive_samples: int() trunca, no rechaza. Documentarlo aquí
+        # evita que alguien lo "arregle" en un solo sitio y deje a los dos enteros inconsistentes.
+        params, err = sources.validate_params({'coherence_window': 1.5}, DEM_RES)
+        self.assertIsNone(err)
+        self.assertEqual(params['coherence_window'], 1)
+
     def test_each_parameter_reports_its_own_range(self):
         cases = {
             'segment_length': (0.1, '0.5', '100'),
             'search_half_width': (0.5, '1', '50'),
             'break_threshold': (1.0, '2', '200'),
             'min_consecutive_samples': (99, '1', '20'),
+            'surface_tolerance': (1.0, '0.02', '0.5'),
+            'coherence_window': (9, '0', '5'),
         }
         for key, (bad, low, high) in cases.items():
             with self.subTest(param=key):

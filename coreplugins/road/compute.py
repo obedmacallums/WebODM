@@ -22,7 +22,7 @@ from rasterio.windows import Window
 
 from app.geoutils import get_rasterio_to_meters_factor
 
-from . import geometry, profile
+from . import coherence, geometry, profile
 
 # Techo de píxeles por lectura. 4 M en float32 son 16 MB: el DEM de un vuelo grande no cabe
 # cómodamente en la memoria del worker, y el eje solo cubre una franja estrecha de él.
@@ -47,6 +47,9 @@ WARN_SAMPLES = 8_000_000
 STATUS_MEASURED = 'measured'
 STATUS_NO_EDGE = 'no_edge'
 STATUS_NO_COVERAGE = 'no_coverage'
+# Ancho presente pero con al menos un borde procedente de la vecindad (`006` data-model §6): el
+# usuario distingue así lo medido de lo deducido sin perder el número.
+STATUS_INFERRED = 'inferred'
 
 
 class Canceled(Exception):
@@ -143,8 +146,16 @@ def _segment_metrics(segment, offsets, params, unit_factor, axis_values, cross_v
     fit = profile.fit_grade(stations - stations[0], _to_list(axis_values))
 
     cross_list = _to_list(cross_values)
-    edges = profile.detect_edges(offsets, cross_list, params['break_threshold'],
-                                 params['min_consecutive_samples'])
+    if params.get('edge_mode') == 'surface':
+        # La tolerancia es vertical y no se convierte; la semilla es horizontal y va en la unidad
+        # de `offsets`, que aquí es la nativa del CRS (`006` D18).
+        edges = profile.detect_edges_surface(
+            offsets, cross_list, params['surface_tolerance'],
+            params['min_consecutive_samples'],
+            seed_half_width=profile.SURFACE_SEED_HALF_WIDTH / unit_factor)
+    else:
+        edges = profile.detect_edges(offsets, cross_list, params['break_threshold'],
+                                     params['min_consecutive_samples'])
     left, right = edges['left'], edges['right']
 
     if fit is None:
@@ -168,7 +179,12 @@ def _segment_metrics(segment, offsets, params, unit_factor, axis_values, cross_v
         if left_reason is None and right_reason is None:
             status = STATUS_MEASURED
             width = offset_left + offset_right
-            cross = profile.cross_slope(offsets, cross_list, left['index'], right['index'])
+            if params.get('edge_mode') == 'surface':
+                # D19: el bombeo ES la pendiente de la referencia ajustada, medida exactamente
+                # sobre las muestras que el criterio consideró calzada.
+                cross = edges['reference']['cross_slope']
+            else:
+                cross = profile.cross_slope(offsets, cross_list, left['index'], right['index'])
         else:
             status = STATUS_NO_EDGE
             width = None
@@ -188,8 +204,17 @@ def _segment_metrics(segment, offsets, params, unit_factor, axis_values, cross_v
         'cross_slope': cross,
         'left_reason': left_reason,
         'right_reason': right_reason,
+        # Origen por lado (`006` FR-019): en la detección todo borde presente es medido; la
+        # pasada de coherencia es la única que puede poner `inferred`.
+        'left_edge_source': 'measured' if offset_left is not None else None,
+        'right_edge_source': 'measured' if offset_right is not None else None,
         '_edge_left': edge_left_pt,
         '_edge_right': edge_right_pt,
+        # El bombeo de la referencia sobrevive para la reparación (D22): si la coherencia mueve
+        # un borde en modo superficie, la referencia —que es de la calzada, no del borde— sigue
+        # siendo válida y evita recalcular el ajuste.
+        '_reference_cross': (edges.get('reference') or {}).get('cross_slope')
+                            if params.get('edge_mode') == 'surface' else None,
     }
 
 
@@ -241,6 +266,13 @@ def analyze(dem_path, vertices, params, progress_callback=None, should_cancel=No
         results = []
         cum = geometry.cumulative_stations(coords)
 
+        # La reparación necesita ver todos los tramos a la vez y recalcular el bombeo de los que
+        # toque, así que cuando está activada se retiene el perfil transversal de cada tramo
+        # (D22). Con la ventana a 0 no se retiene nada y la memoria es la de siempre. Peor caso
+        # realista: 2.000 tramos x 1.001 muestras ~ 16 MB en float64.
+        window = int(params.get('coherence_window') or 0)
+        retained = [] if window > 0 else None
+
         index = 0
         while index < len(segments):
             if canceled():
@@ -254,10 +286,22 @@ def analyze(dem_path, vertices, params, progress_callback=None, should_cancel=No
                 metrics = _segment_metrics(segment, offsets, params, unit_factor,
                                            sampled['axis'], sampled['cross'])
                 results.append(_build_segment(segment, metrics, offsets, unit_factor))
+                if retained is not None:
+                    retained.append({
+                        'cross': sampled['cross'],
+                        'normal': segment['normal'],
+                        'midpoint': segment['midpoint'],
+                        'reference_cross': metrics['_reference_cross'],
+                    })
 
             index += size
             if progress_callback is not None:
                 progress_callback('Analizando el camino', 100.0 * index / len(segments))
+
+        # La coherencia va antes de la reproyección: mueve puntos de borde, y reproyectar dos
+        # veces es justo el coste que la pasada única de abajo evita (D22).
+        if retained is not None:
+            _apply_coherence(results, retained, offsets, params, unit_factor, window)
 
         # Una sola reproyección para todos los puntos de todos los tramos: `rasterio.warp.transform`
         # tiene un coste fijo por llamada nada despreciable, y hacerlo por tramo eran cuatro
@@ -266,6 +310,71 @@ def analyze(dem_path, vertices, params, progress_callback=None, should_cancel=No
 
     summary = _summarize(results, total_samples, time.time() - started)
     return {'segments': results, 'summary': summary}
+
+
+def _apply_coherence(segments, retained, offsets, params, unit_factor, window):
+    """Aplica `coherence.repair_edges` sobre los tramos ya construidos (`006` FR-011..FR-018).
+
+    Trabaja en metros —los offsets de los tramos ya están convertidos— y recompone ancho, estado,
+    bombeo y puntos de borde de los tramos que la reparación tocó. Los `no_coverage` quedan fuera
+    del todo: sin rasante no hay borde que votar ni que recibir.
+    """
+    eligible = [s['status'] != STATUS_NO_COVERAGE for s in segments]
+    left_seq = [s['offset_left'] if ok else None for s, ok in zip(segments, eligible)]
+    right_seq = [s['offset_right'] if ok else None for s, ok in zip(segments, eligible)]
+
+    left_rep, right_rep = coherence.repair_edges(left_seq, right_seq, window)
+
+    step = offsets[1] - offsets[0] if len(offsets) > 1 else 1.0
+    surface_mode = params.get('edge_mode') == 'surface'
+
+    for i, (segment, ok) in enumerate(zip(segments, eligible)):
+        if not ok:
+            continue
+        (lo, lsrc), (ro, rsrc) = left_rep[i], right_rep[i]
+        segment['left_edge_source'] = lsrc
+        segment['right_edge_source'] = rsrc
+        if lsrc != coherence.INFERRED and rsrc != coherence.INFERRED:
+            continue   # nada cambió en este tramo; los motivos y métricas quedan como estaban
+
+        segment['offset_left'], segment['offset_right'] = lo, ro
+        # Los motivos NO se tocan (FR-020): siguen diciendo por qué no hubo borde medido.
+
+        info = retained[i]
+        for side, value in (('edge_left', lo), ('edge_right', ro)):
+            segment[side] = _offset_point(info, value, unit_factor,
+                                          +1 if side == 'edge_left' else -1)
+
+        if lo is None or ro is None:
+            segment.update({'width': None, 'cross_slope': None, 'status': STATUS_NO_EDGE})
+            continue
+
+        segment['width'] = lo + ro
+        segment['status'] = STATUS_INFERRED
+        if surface_mode and info['reference_cross'] is not None:
+            # D19/D22: la referencia es de la calzada, no del borde — mover el borde no la
+            # invalida y el bombeo retenido sigue siendo el correcto.
+            segment['cross_slope'] = info['reference_cross']
+        else:
+            cross_list = _to_list(info['cross'])
+            li = _nearest_offset_index(offsets, lo / unit_factor, step)
+            ri = _nearest_offset_index(offsets, -ro / unit_factor, step)
+            segment['cross_slope'] = profile.cross_slope(offsets, cross_list, li, ri)
+
+
+def _nearest_offset_index(offsets, d, step):
+    index = int(round((d - offsets[0]) / step))
+    return max(0, min(len(offsets) - 1, index))
+
+
+def _offset_point(info, offset_m, unit_factor, sign):
+    """Punto `(x, y)` nativo de un borde a `offset_m` metros del eje, o `None`."""
+    if offset_m is None:
+        return None
+    mx, my = info['midpoint']
+    nx, ny = info['normal']
+    d = sign * offset_m / unit_factor
+    return [mx + d * nx, my + d * ny]
 
 
 def _unproject_in_place(segments, crs):
@@ -353,6 +462,8 @@ def _build_segment(segment, metrics, offsets, unit_factor):
         'status': metrics['status'],
         'left_reason': metrics['left_reason'],
         'right_reason': metrics['right_reason'],
+        'left_edge_source': metrics['left_edge_source'],
+        'right_edge_source': metrics['right_edge_source'],
         'cross_section': [list(p) for p in cross_ends],
         'edge_left': (list(metrics['_edge_left']) if metrics['_edge_left'] is not None else None),
         'edge_right': (list(metrics['_edge_right']) if metrics['_edge_right'] is not None
@@ -376,6 +487,9 @@ def _summarize(segments, samples, duration):
     return {
         'segment_count': len(segments),
         'measured_count': sum(1 for s in segments if s['status'] == STATUS_MEASURED),
+        # Los `inferred` cuentan en las estadísticas de ancho —tienen ancho— pero no como
+        # medidos: el agregado no borra la distinción que el tramo declara (`006` data-model §5).
+        'inferred_count': sum(1 for s in segments if s['status'] == STATUS_INFERRED),
         'no_edge_count': sum(1 for s in segments if s['status'] == STATUS_NO_EDGE),
         'no_data_count': sum(1 for s in segments
                              if profile.NO_DATA in (s['left_reason'], s['right_reason'])),

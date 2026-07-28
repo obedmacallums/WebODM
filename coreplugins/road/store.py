@@ -288,9 +288,25 @@ def read_segments(task_id, analysis_id):
     """Documento de tramos, o `None` si el archivo no está o no es legible (`410 result_missing`)."""
     try:
         with open(segments_path(task_id, analysis_id)) as f:
-            return json.load(f)
+            return _upgrade_segments(json.load(f))
     except (OSError, ValueError):
         return None
+
+
+def _upgrade_segments(document):
+    """Completa en memoria un documento escrito antes de `006-street-width` (FR-024).
+
+    Los análisis antiguos no traen el origen por lado. Todo borde que exista se interpreta como
+    medido —no hubo coherencia que pudiera inferirlo— y nada se escribe en disco: el archivo
+    antiguo sigue siendo válido tal cual, sin migración ni cambio de `version`.
+    """
+    for segment in document.get('segments') or []:
+        for side in ('left', 'right'):
+            key = '{}_edge_source'.format(side)
+            if key not in segment:
+                segment[key] = ('measured'
+                                if segment.get('offset_{}'.format(side)) is not None else None)
+    return document
 
 
 def delete_segments(task_id, analysis_id):

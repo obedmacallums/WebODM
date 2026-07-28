@@ -54,6 +54,12 @@ NO_COVERAGE = segment(2, status='no_coverage', elevation=None, grade=None, grade
                       left_reason='no_data', right_reason='no_data',
                       edge_left=None, edge_right=None)
 
+# Un tramo reparado por la coherencia: la derecha viene de los vecinos, con su motivo original
+# conservado (`006` data-model §6, tercera fila de la tabla de combinaciones).
+INFERRED = segment(3, status='inferred', width=9.8, offset_left=4.0, offset_right=5.8,
+                   left_edge_source='measured', right_edge_source='inferred',
+                   right_reason='no_break')
+
 
 class CsvTest(RoadTestBase):
     def _rows(self, segments):
@@ -62,11 +68,13 @@ class CsvTest(RoadTestBase):
         return text, list(csv.reader(io.StringIO('\n'.join(body))))
 
     def test_header_matches_the_contract(self):
+        # Las dos columnas de origen van AL FINAL (`006` FR-033): quien lea por posición de
+        # columna no se rompe con la ampliación.
         _text, rows = self._rows([segment(0)])
         self.assertEqual(rows[0], [
             'index', 'station_start', 'station_end', 'length', 'elevation', 'grade_pct',
             'grade_deg', 'width', 'offset_left', 'offset_right', 'cross_slope_pct', 'status',
-            'left_reason', 'right_reason'])
+            'left_reason', 'right_reason', 'left_edge_source', 'right_edge_source'])
 
     def test_one_row_per_segment(self):
         _text, rows = self._rows([segment(0), UNMEASURED, NO_COVERAGE])
@@ -114,6 +122,48 @@ class CsvTest(RoadTestBase):
 
         self.assertFalse(lines[0].startswith('#'))
         self.assertTrue(lines[-1].startswith('#'))
+
+
+class CsvEdgeSourceTest(RoadTestBase):
+    """El origen de cada borde viaja como dato (`006` FR-033, SC-005)."""
+
+    def _row(self, seg):
+        text = export.to_csv(ANALYSIS, [seg])
+        body = [l for l in text.splitlines() if not l.startswith('#')]
+        rows = list(csv.reader(io.StringIO('\n'.join(body))))
+        return dict(zip(rows[0], rows[1]))
+
+    def test_an_inferred_side_says_so_and_keeps_its_reason(self):
+        row = self._row(INFERRED)
+
+        self.assertEqual(row['left_edge_source'], 'measured')
+        self.assertEqual(row['right_edge_source'], 'inferred')
+        self.assertEqual(row['right_reason'], 'no_break')     # el motivo no se borra
+        self.assertEqual(row['offset_right'], '5.800')        # y la distancia existe
+        self.assertEqual(row['status'], 'inferred')
+
+    def test_a_segment_without_edges_has_empty_sources(self):
+        row = self._row(UNMEASURED)
+        self.assertEqual(row['left_edge_source'], '')
+        self.assertEqual(row['right_edge_source'], '')
+
+    def test_a_pre_feature_document_exports_without_the_fields_crashing(self):
+        # Un documento guardado antes de esta feature no trae las claves de origen: el export las
+        # deja vacías en vez de reventar (FR-024).
+        old = segment(0)
+        row = self._row(old)
+        self.assertEqual(row['left_edge_source'], '')
+
+    def test_the_new_params_travel_in_the_comment_block(self):
+        analysis = dict(ANALYSIS)
+        analysis['params'] = dict(ANALYSIS['params'], edge_mode='surface',
+                                  surface_tolerance=0.06, coherence_window=2)
+        text = export.to_csv(analysis, [segment(0)])
+        comments = '\n'.join(l for l in text.splitlines() if l.startswith('#'))
+
+        self.assertIn('edge_mode: surface', comments)
+        self.assertIn('surface_tolerance', comments)
+        self.assertIn('coherence_window', comments)
 
 
 class GeoJsonTest(RoadTestBase):
@@ -166,6 +216,24 @@ class GeoJsonTest(RoadTestBase):
         self.assertIsNone(feature['properties']['width'])
         self.assertIsNone(feature['properties']['cross_slope'])
 
+    def test_segment_features_carry_the_edge_sources(self):
+        doc = self._doc([INFERRED])
+        feature = next(f for f in doc['features'] if f['properties']['kind'] == 'segment')
+
+        self.assertEqual(feature['properties']['left_edge_source'], 'measured')
+        self.assertEqual(feature['properties']['right_edge_source'], 'inferred')
+        self.assertEqual(feature['properties']['status'], 'inferred')
+
+    def test_edge_points_declare_their_source(self):
+        # Sin `source` en el punto, en QGIS un borde inferido sería indistinguible de uno medido
+        # y se daría por medido lo que no lo está (`006` FR-033).
+        doc = self._doc([INFERRED])
+        edges = {f['properties']['side']: f for f in doc['features']
+                 if f['properties']['kind'] == 'edge'}
+
+        self.assertEqual(edges['left']['properties']['source'], 'measured')
+        self.assertEqual(edges['right']['properties']['source'], 'inferred')
+
     def test_parameters_travel_in_the_collection_properties(self):
         doc = self._doc([segment(0)])
         props = doc['properties']
@@ -204,7 +272,8 @@ class ExportEndpointTest(AnalysesApiTestBase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertIn('attachment', res['Content-Disposition'])
         self.assertIn('-road.csv', res['Content-Disposition'])
-        self.assertEqual(len(res.content.decode().splitlines()[0].split(',')), 14)
+        # 14 columnas de `005` + las dos de origen que `006` añade al final (FR-033).
+        self.assertEqual(len(res.content.decode().splitlines()[0].split(',')), 16)
 
     def test_geojson_download_parses(self):
         task = self._task_with_dem()

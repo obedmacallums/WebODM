@@ -18,6 +18,8 @@ CSV_COLUMNS = [
     'index', 'station_start', 'station_end', 'length', 'elevation', 'grade_pct', 'grade_deg',
     'width', 'offset_left', 'offset_right', 'cross_slope_pct', 'status', 'left_reason',
     'right_reason',
+    # Al final a propósito (`006` FR-033): quien lea el CSV por posición de columna no se rompe.
+    'left_edge_source', 'right_edge_source',
 ]
 
 # De qué campo del tramo sale cada columna, cuando el nombre no coincide.
@@ -90,7 +92,7 @@ def _segment_feature(segment):
     properties.update({key: segment.get(key) for key in (
         'index', 'station_start', 'station_end', 'length', 'elevation', 'grade', 'grade_deg',
         'width', 'offset_left', 'offset_right', 'cross_slope', 'status', 'left_reason',
-        'right_reason')})
+        'right_reason', 'left_edge_source', 'right_edge_source')})
     return {
         'type': 'Feature',
         'geometry': {'type': 'LineString', 'coordinates': segment['geometry']},
@@ -115,7 +117,11 @@ def _edge_features(segment):
         features.append({
             'type': 'Feature',
             'geometry': {'type': 'Point', 'coordinates': point},
-            'properties': {'kind': 'edge', 'index': segment['index'], 'side': side},
+            # `source` en el propio punto (`006` FR-033): un borde inferido también se emite —su
+            # posición deducida es información— pero sin esta propiedad, en QGIS sería
+            # indistinguible de uno medido y se daría por medido lo que no lo está.
+            'properties': {'kind': 'edge', 'index': segment['index'], 'side': side,
+                           'source': segment.get('{}_edge_source'.format(side))},
         })
     return features
 

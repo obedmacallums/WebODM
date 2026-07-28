@@ -54,8 +54,20 @@ function popupHtml(segment){
   const sides = ['left', 'right'].map(side => {
     const reason = reasonLabel(segment[`${side}_reason`]);
     const offset = segment[`offset_${side}`];
+    const source = segment[`${side}_edge_source`];
     const label = side === 'left' ? _('Izquierda') : _('Derecha');
-    return `<tr><th>${label}</th><td>${reason ? reason : fmt(offset, 2, ' m')}</td></tr>`;
+    // Un lado puede llevar distancia Y motivo a la vez (`006` FR-020): "no se pudo medir aquí,
+    // el valor viene de los vecinos". Las dos cosas se muestran, no compiten.
+    let cell;
+    if (offset !== null && offset !== undefined){
+      cell = fmt(offset, 2, ' m');
+      if (source === 'inferred'){
+        cell += ` <em>(${_('inferido')}${reason ? ': ' + reason : ''})</em>`;
+      }
+    }else{
+      cell = reason ? reason : '—';
+    }
+    return `<tr><th>${label}</th><td>${cell}</td></tr>`;
   }).join('');
 
   return `<div class="road-segment-popup">

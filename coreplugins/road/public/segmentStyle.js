@@ -9,12 +9,15 @@
 // Convenio de estilos:
 //
 //   measured     -> color por pendiente, trazo continuo
-//   no_edge      -> color por pendiente, trazo **discontinuo**: hay rasante pero no hay ancho
+//   inferred     -> color por pendiente, trazo a rayas LARGAS (`12,4`): hay ancho, pero al menos
+//                   un borde viene de los vecinos (`006` FR-032)
+//   no_edge      -> color por pendiente, trazo discontinuo corto (`6,6`): hay rasante, no hay ancho
 //   no_coverage  -> gris y discontinuo: no hay ni cota
 //
 // El trazo discontinuo es lo que distingue a simple vista un tramo medido de uno que no lo está
 // (quickstart, escenario 2) sin tirar a la basura la pendiente, que en un tramo `no_edge` está
-// perfectamente medida.
+// perfectamente medida. La raya larga del `inferred` queda a medio camino a propósito: más
+// continua que un `no_edge` —el ancho existe— y menos que un `measured` —no todo se midió aquí.
 
 export function colors(){
   return {
@@ -37,12 +40,13 @@ export function colorForGrade(grade, thresholds){
 }
 
 export function styleForSegment(segment, thresholds){
-  const measured = segment && segment.status === 'measured';
+  const status = segment ? segment.status : null;
+  const hasWidth = status === 'measured' || status === 'inferred';
   return {
     color: colorForGrade(segment ? segment.grade : null, thresholds),
-    weight: measured ? 6 : 5,
-    opacity: measured ? 0.95 : 0.75,
-    dashArray: measured ? null : '6,6',
+    weight: hasWidth ? 6 : 5,
+    opacity: hasWidth ? 0.95 : 0.75,
+    dashArray: status === 'measured' ? null : (status === 'inferred' ? '12,4' : '6,6'),
     lineCap: 'butt'
   };
 }
