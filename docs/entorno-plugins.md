@@ -103,6 +103,16 @@ máquina de desarrollo local (Mac Apple Silicon) solo se corren tests ligeros qu
 requieran dependencias nativas — nunca se instalan librerías geoespaciales (GDAL, PDAL,
 rasterio…) en el host para poder ejecutar un test: ese test pertenece a Docker.
 
+> ⚠️ **La suite del core no se corre contra un stack vivo.** `webodm/settings.py` cambia a
+> `DummyCache` solo cuando `DEBUG and not TESTING`; con `DEBUG=False` los tests escriben en el
+> **mismo Redis** (`WO_BROKER`) que usa la aplicación. La base de datos de test está aislada, el
+> caché no. Comprobado: correr `webodm.sh test` dejó `app_basemaps` con el fixture de
+> `app/tests/test_basemap.py` y 24 h de TTL, y los mapas base desaparecieron de toda la aplicación.
+> Las suites de **plugins** (`webodm.sh test backend coreplugins.<x>.tests`) sí son seguras. Si hace
+> falta correr la del core igualmente, limpiar después con
+> `cache.delete('app_basemaps')` e inspeccionar con
+> `docker compose exec -T broker redis-cli --scan --pattern ':1:*'`.
+
 - **Suite completa (oficial)**: `./run_tests_in_docker.sh [args]` — construye la imagen
   con `TEST_BUILD=ON`, levanta el stack de compose, ejecuta los tests dentro del
   contenedor webapp y limpia todo al salir (`docker compose down -v`). Los argumentos se
