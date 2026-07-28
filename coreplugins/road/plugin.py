@@ -1,7 +1,7 @@
 from app.plugins import PluginBase
 from app.plugins import MountPoint
 
-from .api import AnalysisCancel, AnalysisDetail, AnalysisList, Capabilities
+from .api import (AnalysisCancel, AnalysisDetail, AnalysisExport, AnalysisList, Capabilities)
 from . import signals  # noqa: F401 - registra el receptor de task_removed (borrado en cascada)
 
 
@@ -22,6 +22,8 @@ class Plugin(PluginBase):
             MountPoint('task/(?P<pk>[^/.]+)/analyses$', AnalysisList.as_view()),
             MountPoint('task/(?P<pk>[^/.]+)/analyses/(?P<analysis_id>[^/.]+)/cancel$',
                        AnalysisCancel.as_view()),
+            MountPoint('task/(?P<pk>[^/.]+)/analyses/(?P<analysis_id>[^/.]+)/export$',
+                       AnalysisExport.as_view()),
             MountPoint('task/(?P<pk>[^/.]+)/analyses/(?P<analysis_id>[^/.]+)$',
                        AnalysisDetail.as_view()),
         ]

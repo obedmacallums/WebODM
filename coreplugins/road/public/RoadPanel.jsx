@@ -147,6 +147,13 @@ export default class RoadPanel extends React.Component {
     }).always(() => this.setState({launching: false}));
   }
 
+  // La descarga la dispara el bridge con un enlace temporal por archivo y no con
+  // `window.location.href`, que solo atiende una a la vez: pedir CSV y GeoJSON seguidos con el
+  // segundo método se traía un único archivo.
+  handleDownload = (analysis, format) => {
+    bridge.downloadExport(this.taskId(), analysis.id, format);
+  }
+
   handleCancel = (analysis) => {
     $.ajax({url: `${this.apiBase()}/analyses/${analysis.id}/cancel`, type: 'POST'})
       .done(this.loadAnalyses)
@@ -216,12 +223,19 @@ export default class RoadPanel extends React.Component {
         : null}
 
       {analysis.status === 'completed' ?
-        <div className="road-summary">
-          <span>{summary.segment_count} {_("tramos")}</span>
-          <span>{(summary.length || 0).toFixed(0)} m</span>
-          {summary.mean_width !== null && summary.mean_width !== undefined ?
-            <span>{_("ancho medio")} {summary.mean_width.toFixed(2)} m</span> : null}
-          <span>{_("pendiente")} {(summary.min_grade || 0).toFixed(1)}% … {(summary.max_grade || 0).toFixed(1)}%</span>
+        <div>
+          <div className="road-summary">
+            <span>{summary.segment_count} {_("tramos")}</span>
+            <span>{(summary.length || 0).toFixed(0)} m</span>
+            {summary.mean_width !== null && summary.mean_width !== undefined ?
+              <span>{_("ancho medio")} {summary.mean_width.toFixed(2)} m</span> : null}
+            <span>{_("pendiente")} {(summary.min_grade || 0).toFixed(1)}% … {(summary.max_grade || 0).toFixed(1)}%</span>
+          </div>
+          <div className="road-downloads">
+            {_("Descargar:")}
+            <a onClick={() => this.handleDownload(analysis, 'csv')}>CSV</a>
+            <a onClick={() => this.handleDownload(analysis, 'geojson')}>GeoJSON</a>
+          </div>
         </div>
         : null}
 

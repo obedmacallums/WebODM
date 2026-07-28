@@ -20,4 +20,5 @@ from .test_api_capabilities import *  # noqa: F401,F403
 from .test_axis import *              # noqa: F401,F403
 from .test_compute import *           # noqa: F401,F403
 from .test_api_analyses import *      # noqa: F401,F403
+from .test_export import *            # noqa: F401,F403
 from .test_frontend import *          # noqa: F401,F403

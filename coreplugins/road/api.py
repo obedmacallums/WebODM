@@ -13,7 +13,9 @@ import datetime
 import uuid
 
 from rest_framework import status
+from rest_framework.negotiation import DefaultContentNegotiation
 from rest_framework.response import Response
+from django.http import HttpResponse
 from django.utils.translation import gettext_lazy as _
 
 from app.api.common import check_project_perms
@@ -21,7 +23,7 @@ from app.plugins.views import TaskView
 from app.plugins.worker import run_function_async
 
 from . import axis as axis_module
-from . import compute, geometry, sources, store
+from . import compute, export, geometry, sources, store
 
 # Códigos de error de `contracts/rest-api.md`.
 ERR_INVALID_PARAMETER = 'invalid_parameter'
@@ -265,6 +267,60 @@ class AnalysisDetail(TaskView):
             payload['segments'] = document.get('segments', [])
 
         return Response(payload, status=status.HTTP_200_OK)
+
+
+class _IgnoreFormatQueryParam(DefaultContentNegotiation):
+    """Negociación de contenido que **no** mira el parámetro `?format=`.
+
+    `format` es un nombre reservado por DRF (`URL_FORMAT_OVERRIDE`): lo usa para elegir renderer, y
+    ante un valor que no corresponde a ninguno —`csv`, `geojson`— responde `404` *antes* de
+    ejecutar la vista. El contrato de esta feature usa `?format=csv|geojson` con otro significado,
+    así que aquí se desactiva esa negociación y el primer renderer (JSON) atiende las respuestas de
+    error; la descarga en sí sale como `HttpResponse` y no pasa por renderer.
+    """
+
+    def select_renderer(self, request, renderers, format_suffix=None):
+        return renderers[0], renderers[0].media_type
+
+
+class AnalysisExport(TaskView):
+    """`GET task/<pk>/analyses/<analysis_id>/export?format=csv|geojson`.
+
+    No exige `change_project`: descargar no modifica nada, y un usuario con acceso de lectura tiene
+    que poder llevarse el resultado a su hoja de cálculo o a QGIS.
+    """
+
+    content_negotiation_class = _IgnoreFormatQueryParam
+
+    FORMATS = {
+        'csv': ('text/csv', export.to_csv),
+        'geojson': ('application/geo+json', export.to_geojson),
+    }
+
+    def get(self, request, pk=None, analysis_id=None):
+        task = self.get_and_check_task(request, pk)
+
+        fmt = (request.query_params.get('format') or 'csv').lower()
+        if fmt not in self.FORMATS:
+            return error(_('Formato no admitido: %(fmt)s. Use csv o geojson.') % {'fmt': fmt},
+                         ERR_INVALID_PARAMETER)
+
+        analysis = store.get_analysis(str(task.id), analysis_id)
+        if analysis is None:
+            return error(_('El análisis no existe en esta tarea.'), ERR_NOT_FOUND,
+                         status.HTTP_404_NOT_FOUND)
+
+        document = store.read_segments(str(task.id), analysis_id)
+        if document is None:
+            return error(_('El resultado de este análisis ya no está disponible.'),
+                         ERR_RESULT_MISSING, status.HTTP_410_GONE)
+
+        content_type, render = self.FORMATS[fmt]
+        response = HttpResponse(render(analysis, document.get('segments', [])),
+                                content_type=content_type)
+        response['Content-Disposition'] = 'attachment; filename="{}"'.format(
+            export.filename(task.name, analysis.get('name'), fmt))
+        return response
 
 
 class AnalysisCancel(TaskView):

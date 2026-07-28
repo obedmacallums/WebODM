@@ -120,13 +120,13 @@ tres familias de entidades.
 
 ### Tests for User Story 2
 
-- [ ] T030 [P] [US2] Escribir `coreplugins/road/tests/test_export.py`: el CSV tiene cabecera y una fila por tramo, las celdas sin dato van **vacías** y no a cero, el GeoJSON valida como `FeatureCollection` con las entidades `segment`, `cross_section` y `edge`, ambos incluyen los parámetros del análisis, y el nombre del archivo lleva tarea y análisis pasados por `slugify`
+- [X] T030 [P] [US2] Escribir `coreplugins/road/tests/test_export.py`: el CSV tiene cabecera y una fila por tramo, las celdas sin dato van **vacías** y no a cero, el GeoJSON valida como `FeatureCollection` con las entidades `segment`, `cross_section` y `edge`, ambos incluyen los parámetros del análisis, y el nombre del archivo lleva tarea y análisis pasados por `slugify`
 
 ### Implementation for User Story 2
 
-- [ ] T031 [US2] Implementar `coreplugins/road/export.py`: `to_csv(analysis, segments)` con las columnas exactas de [contracts/rest-api.md](./contracts/rest-api.md) y el bloque de comentarios `#` con los parámetros, y `to_geojson(analysis, segments)` con las tres familias de entidades distinguidas por `kind`
-- [ ] T032 [US2] Añadir a `coreplugins/road/api.py` la vista `GET task/<pk>/analyses/<id>/export?format=csv|geojson` con `Content-Disposition: attachment` y `410 result_missing` si el archivo de tramos no está; registrar la ruta en `plugin.py`
-- [ ] T033 [US2] Añadir los botones de descarga CSV y GeoJSON a `coreplugins/road/public/RoadPanel.jsx`, encadenando descargas con un enlace temporal por archivo (el truco de `annotationsBridge.js`: `window.location.href` solo atiende una a la vez)
+- [X] T031 [US2] Implementar `coreplugins/road/export.py`: `to_csv(analysis, segments)` con las columnas exactas de [contracts/rest-api.md](./contracts/rest-api.md) y el bloque de comentarios `#` con los parámetros, y `to_geojson(analysis, segments)` con las tres familias de entidades distinguidas por `kind`
+- [X] T032 [US2] Añadir a `coreplugins/road/api.py` la vista `GET task/<pk>/analyses/<id>/export?format=csv|geojson` con `Content-Disposition: attachment` y `410 result_missing` si el archivo de tramos no está; registrar la ruta en `plugin.py`
+- [X] T033 [US2] Añadir los botones de descarga CSV y GeoJSON a `coreplugins/road/public/RoadPanel.jsx`, encadenando descargas con un enlace temporal por archivo (el truco de `annotationsBridge.js`: `window.location.href` solo atiende una a la vez)
 
 **Checkpoint**: US1 y US2 funcionan de forma independiente.
 
