@@ -213,7 +213,7 @@ con cada una y ver los tramos desplazados de forma coherente con la corrección 
 - [X] T056 Verificar SC-002 con evidencia: ejecutar el escenario 1 de [quickstart.md](./quickstart.md) sobre un camino de 1 km con parámetros por defecto y mostrar el tiempo total por debajo de 2 minutos con progreso visible
 - [X] T057 Verificar SC-005 y SC-008 con evidencia: ejecutar los escenarios 3 y 5 de [quickstart.md](./quickstart.md) — recoloreado completo por debajo de 2 segundos sin recálculo, y cancelación devolviendo el control en menos de 5 segundos
 - [X] T058 Comprobar la convivencia en el bus del core entre `coreplugins/road/public/roadBridge.js` y `coreplugins/annotations/public/annotationsBridge.js`: con ambos plugins activos, una acción sobre una anotación ajena no pasa por los manejadores de `road` ni al revés
-- [ ] T059 Ejecutar la validación manual completa de [quickstart.md](./quickstart.md) (10 escenarios) y anotar los resultados
+- [ ] T059 Ejecutar la validación manual completa de [quickstart.md](./quickstart.md) (10 escenarios) y anotar los resultados — **resultados en [validacion-manual.md](./validacion-manual.md)**: 3 escenarios validados a ojo (1, 5, 9), 6 cubiertos por la suite pero no reproducidos a mano, y el 10 (deshabilitar el plugin) pendiente por requerir un cambio de configuración en administración
 - [ ] T060 Ejecutar la suite completa y mostrar su salida: `./run_tests_in_docker.sh`, más `webodm.sh test backend coreplugins.realign.tests` para confirmar que la ampliación de `realign` no rompió nada
 
 ---
