@@ -28,6 +28,10 @@ Documentación completa de diseño en [`specs/005-road-metrics/`](../../specs/00
 - **Semáforo en el cliente**: el color sale de la pendiente y de dos umbrales que el usuario mueve
   con recoloreado inmediato; los umbrales se persisten sin invalidar el cálculo.
 - **Exportación**: CSV (una fila por tramo) y GeoJSON (tramos, transversales y puntos de borde).
+- **Tramo bajo el cursor**: al pasar el ratón, el tramo gana un contorno blanco que lo separa de sus
+  vecinos —dos tramos del mismo color dejan de parecer una sola línea— y al hacer clic aparecen sus
+  métricas. El contorno se queda mientras el popup está abierto, para no perder de vista de qué
+  tramo hablaba.
 
 ## Parámetros de cálculo
 

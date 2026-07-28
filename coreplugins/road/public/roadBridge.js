@@ -1,7 +1,7 @@
 import L from 'leaflet';
 import PluginsAPI from 'webodm/classes/plugins/API';
 import { _ } from 'webodm/classes/gettext';
-import { styleForSegment, reasonLabel } from './segmentStyle';
+import { styleForSegment, reasonLabel, haloStyleFor } from './segmentStyle';
 
 // Diálogo con el bus de anotaciones del core (`contracts/consumed-contracts.md` §3).
 //
@@ -82,10 +82,67 @@ function buildGroup(segments, thresholds){
   return L.featureGroup(layers);
 }
 
+// --- Resaltado del tramo bajo el cursor ---------------------------------------------------
+//
+// Un análisis de 1 km son ~200 polilíneas contiguas, y dos tramos del mismo color parecen una sola
+// línea: sin resaltado no se ve dónde acaba uno y empieza el siguiente, ni qué tramo va a
+// responder al click. Se resuelve con **una sola** línea de realce reutilizable que adopta la
+// geometría del tramo activo — no con un contorno por tramo, que multiplicaría los layers por dos.
+
+let haloLayer = null;
+let pinnedLayer = null;   // tramo cuyo popup está abierto: conserva el contorno al mover el ratón
+
+function showHalo(map, layer){
+  if (!layer || !layer._roadSegment) return false;
+
+  if (!haloLayer) haloLayer = L.polyline([], haloStyleFor(layer._roadSegment));
+  haloLayer.setLatLngs(layer.getLatLngs());
+  haloLayer.setStyle(haloStyleFor(layer._roadSegment));
+  if (!map.hasLayer(haloLayer)) haloLayer.addTo(map);
+
+  // El orden es lo que hace visible la separación: el contorno sube por encima de **todos** los
+  // tramos (incluidos los vecinos, que así quedan recortados por su blanco) y acto seguido el
+  // tramo activo sube por encima del contorno, conservando su color. Invertir estas dos líneas
+  // deja el blanco tapando el semáforo.
+  haloLayer.bringToFront();
+  layer.bringToFront();
+  return true;
+}
+
+function hideHalo(){
+  if (haloLayer && haloLayer._map) haloLayer.remove();
+  return true;
+}
+
+function attachHighlight(map, group){
+  group.eachLayer(layer => {
+    layer.on('mouseover', () => showHalo(map, layer));
+    layer.on('mouseout', () => {
+      // Con un popup abierto el contorno vuelve a su tramo en vez de desaparecer: si no, al mover
+      // el ratón para leer el popup se pierde de vista de qué tramo hablaba.
+      if (pinnedLayer) showHalo(map, pinnedLayer);
+      else hideHalo();
+    });
+    layer.on('popupopen', () => {
+      pinnedLayer = layer;
+      showHalo(map, layer);
+    });
+    layer.on('popupclose', () => {
+      if (pinnedLayer === layer) pinnedLayer = null;
+      hideHalo();
+    });
+  });
+}
+
+function currentHalo(){
+  return haloLayer && haloLayer._map ? haloLayer : null;
+}
+
 function publishAnalysis(map, task, analysis, segments, opts = {}){
   const thresholds = analysis.color_thresholds || [8.0, 12.0];
   const group = buildGroup(segments, thresholds);
   group.addTo(map);
+  attachHighlight(map, group);
   registry.set(group, {taskId: task.id, analysisId: analysis.id, map, segments, thresholds});
   PluginsAPI.Map.addAnnotation(group, analysis.name, task, !!opts.stored);
   return group;
@@ -94,6 +151,10 @@ function publishAnalysis(map, task, analysis, segments, opts = {}){
 function unpublishAnalysis(group){
   const meta = registry.get(group);
   registry.delete(group);
+  // El contorno sobreviviría al grupo que lo originó y quedaría flotando sobre el mapa señalando
+  // un tramo que ya no existe.
+  if (pinnedLayer && group.hasLayer && group.hasLayer(pinnedLayer)) pinnedLayer = null;
+  hideHalo();
   const map = (meta && meta.map) || group._map;
   if (map && map.hasLayer(group)) map.removeLayer(group);
 }
@@ -197,5 +258,8 @@ export default {
   isOwned,
   downloadExport,
   popupHtml,
+  showHalo,
+  hideHalo,
+  currentHalo,
   registry
 };

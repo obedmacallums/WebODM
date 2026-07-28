@@ -47,6 +47,32 @@ export function styleForSegment(segment, thresholds){
   };
 }
 
+// Contorno blanco del tramo bajo el cursor.
+//
+// Leaflet no sabe dibujar un borde alrededor de un trazo, así que el contorno es una línea blanca
+// más ancha que se coloca **entre los tramos vecinos y el tramo activo**: por encima de los
+// primeros —para que su blanco los recorte y se vea dónde empieza y acaba el tramo— y por debajo
+// del segundo, para no taparle su color del semáforo.
+//
+// `lineCap: 'round'` es lo que produce esa separación: sin él el contorno terminaría justo en los
+// extremos del tramo, el blanco solo asomaría por los flancos, y dos tramos verdes seguidos
+// seguirían pareciendo una sola línea — que es el problema que esto viene a resolver.
+export function haloStyleFor(segment){
+  const base = styleForSegment(segment, null);
+  return {
+    color: '#ffffff',
+    weight: base.weight + 5,
+    opacity: 0.95,
+    // Continuo aunque el tramo sea discontinuo: el contorno marca su extensión, y el trazo
+    // discontinuo del tramo sigue viéndose encima porque se dibuja después.
+    dashArray: null,
+    lineCap: 'round',
+    // Sin esto el contorno queda bajo el cursor y **se come el click**, que es justo lo que no
+    // se quería tocar.
+    interactive: false
+  };
+}
+
 // Etiqueta legible del motivo por el que un lado no tiene borde (FR-021).
 //
 // Los tres motivos describen problemas distintos con soluciones distintas: retocar el umbral de

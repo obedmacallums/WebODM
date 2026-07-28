@@ -41,6 +41,9 @@ class FrontendUnitTest(SimpleTestCase):
     def test_threshold_recolor_is_local_and_complete(self):
         self._run_js('thresholdRecolor.test.js')
 
+    def test_hover_highlight_marks_the_segment_under_the_cursor(self):
+        self._run_js('hoverHighlight.test.js')
+
     def test_bus_coexistence_with_annotations(self):
         """Carga los dos bridges reales a la vez: es la única forma de comprobar que ninguno se
         come los eventos del otro en el bus del core (T058)."""
