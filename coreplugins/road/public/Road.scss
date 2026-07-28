@@ -1,0 +1,28 @@
+.leaflet-control-road{
+  position: relative;
+  // Mismo nivel base que el resto de controles de plugin (contours, viewshed, objdetect,
+  // realign, annotations): sin `!important` el z-index:800 del CSS de Leaflet lo pisa y el
+  // panel queda por debajo. Quién manda con un panel abierto lo decide `panelStacking.js`.
+  z-index: 999 !important;
+
+  a.leaflet-control-road-button{
+    background: url(icon.svg) no-repeat 0 0;
+    background-size: 26px 26px;
+    border-radius: 2px;
+  }
+
+  div.road-panel{ display: none; }
+
+  .open{
+    a.leaflet-control-road-button{
+      display: none;
+    }
+
+    div.road-panel{
+      display: block;
+    }
+  }
+}
+.leaflet-touch .leaflet-control-road a {
+  background-position: 2px 2px;
+}

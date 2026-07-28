@@ -1,0 +1,13 @@
+{
+	"name": "Road",
+	"webodmMinVersion": "3.2.5",
+	"description": "Extract geometric road features from an alignment: per-segment grade, width between detected edges and cross slope, colored on the 2D map and exportable to CSV and GeoJSON",
+	"version": "1.0.0",
+	"author": "Obed Macallums",
+	"email": "obedmacallums@gmail.com",
+	"repository": "https://github.com/OpenDroneMap/WebODM",
+	"tags": ["road", "grade", "width", "dem", "geojson"],
+	"homepage": "https://github.com/OpenDroneMap/WebODM",
+	"experimental": false,
+	"deprecated": false
+}
