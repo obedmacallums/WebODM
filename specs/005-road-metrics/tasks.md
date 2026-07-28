@@ -191,15 +191,15 @@ con cada una y ver los tramos desplazados de forma coherente con la corrección 
 
 ### Tests for User Story 5
 
-- [ ] T047 [P] [US5] Escribir `coreplugins/road/tests/test_variants.py`: con `realign` ausente o sin corregidos solo se ofrece `original`; pedir `realigned` sin realineación devuelve `400 unavailable_variant`; con corregidos presentes el análisis usa el archivo corregido y la variante queda registrada en el análisis y en la exportación
-- [ ] T048 [P] [US5] Añadir a `coreplugins/realign/tests.py` la cobertura del contrato nuevo: `corrected_rasters` devuelve diccionario vacío sin realineación aplicada, tras revertir y cuando el archivo no está en disco, y devuelve las rutas existentes tras aplicar
+- [X] T047 [P] [US5] Escribir `coreplugins/road/tests/test_variants.py`: con `realign` ausente o sin corregidos solo se ofrece `original`; pedir `realigned` sin realineación devuelve `400 unavailable_variant`; con corregidos presentes el análisis usa el archivo corregido y la variante queda registrada en el análisis y en la exportación
+- [X] T048 [P] [US5] Añadir a `coreplugins/realign/tests.py` la cobertura del contrato nuevo: `corrected_rasters` devuelve diccionario vacío sin realineación aplicada, tras revertir y cuando el archivo no está en disco, y devuelve las rutas existentes tras aplicar
 
 ### Implementation for User Story 5
 
-- [ ] T049 [P] [US5] Crear `coreplugins/realign/contract.py` con `CONTRACT_VERSION = 1` y `corrected_rasters(task_id)`, reutilizando los helpers de rutas de su `api.py` y el criterio `state == 'applied'` más presencia real del archivo
-- [ ] T050 [US5] Exponer el contrato en `coreplugins/realign/plugin.py` con `contract_version()` y `corrected_rasters(task_id)` delegando en `contract.py`, y documentarlo en la sección correspondiente de la documentación de `realign`
-- [ ] T051 [US5] Consumir el contrato desde `coreplugins/road/sources.py`: variantes disponibles por modelo, resolución de la ruta según la variante elegida, y degradación a `original` si `realign` falta, está deshabilitado o expone un contrato mayor
-- [ ] T052 [US5] Añadir el selector de variante a `coreplugins/road/public/RoadPanel.jsx`, mostrándolo solo cuando `capabilities` ofrece más de una para el modelo elegido
+- [X] T049 [P] [US5] Crear `coreplugins/realign/contract.py` con `CONTRACT_VERSION = 1` y `corrected_rasters(task_id)`, reutilizando los helpers de rutas de su `api.py` y el criterio `state == 'applied'` más presencia real del archivo
+- [X] T050 [US5] Exponer el contrato en `coreplugins/realign/plugin.py` con `contract_version()` y `corrected_rasters(task_id)` delegando en `contract.py`, y documentarlo en la sección correspondiente de la documentación de `realign`
+- [X] T051 [US5] Consumir el contrato desde `coreplugins/road/sources.py`: variantes disponibles por modelo, resolución de la ruta según la variante elegida, y degradación a `original` si `realign` falta, está deshabilitado o expone un contrato mayor
+- [X] T052 [US5] Añadir el selector de variante a `coreplugins/road/public/RoadPanel.jsx`, mostrándolo solo cuando `capabilities` ofrece más de una para el modelo elegido
 
 **Checkpoint**: las cinco historias funcionan de forma independiente.
 

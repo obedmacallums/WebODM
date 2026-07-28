@@ -12,6 +12,7 @@ from .api import (
     RealignPointCloud,
     RealignPointCloudDownload,
 )
+from . import contract
 
 
 class Plugin(PluginBase):
@@ -33,3 +34,14 @@ class Plugin(PluginBase):
             MountPoint('task/(?P<pk>[^/.]+)/realign/pointcloud/download$', RealignPointCloudDownload.as_view()),
             MountPoint('task/(?P<pk>[^/.]+)/realign/pointcloud$', RealignPointCloud.as_view()),
         ]
+
+    # --- Contrato para otros plugins (`005-road-metrics/contracts/consumed-contracts.md` §2) ---
+    # Delegan enteramente en `contract.py`: ningún otro atributo de esta clase forma parte del
+    # contrato. Un consumidor obtiene este plugin por `get_plugin_by_name` y nunca importando
+    # `coreplugins.realign`, que es lo que le permite degradar si está ausente o deshabilitado.
+
+    def contract_version(self):
+        return contract.CONTRACT_VERSION
+
+    def corrected_rasters(self, task_id):
+        return contract.corrected_rasters(task_id)

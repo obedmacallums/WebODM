@@ -13,7 +13,7 @@ from app.models import Project, Task
 from app.tests.classes import BootTestCase
 from nodeodm import status_codes
 
-from . import transform, corrections, pointcloud, store
+from . import transform, corrections, pointcloud, store, contract
 
 TEST_EXTENT = Polygon.from_bbox([-82.8325, 27.9578, -82.8310, 27.9593])
 POINTCLOUD_ASSET_KEY = 'georeferenced_model.laz'
@@ -1040,3 +1040,83 @@ class WorkerRespectsLaterUserActionTest(BootTestCase):
         self.assertGreater(calls['n'], 1, 'la cancelación no llegó a consultarse dentro del warp')
         self.assertFalse(os.path.isfile(os.path.join(out_dir, 'orthophoto.tif')),
                          'un warp abortado no debe dejar el producto a medias')
+
+
+class RealignContractTest(BootTestCase):
+    """Contrato de consumo para otros plugins del fork (`contract.py`, `CONTRACT_VERSION = 1`).
+
+    Lo consume `road` para ofrecer la variante realineada del DEM. Lo que se prueba aquí es que el
+    contrato **no miente**: devolver una ruta que ya no existe haría que el consumidor la abriera
+    dentro del worker y reventara allí, lejos de donde se podría explicar.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _task(self):
+        project = Project.objects.create(owner=User.objects.get(username="testuser"),
+                                         name="Realign contract project")
+        return Task.objects.create(project=project, status=status_codes.COMPLETED,
+                                   available_assets=["orthophoto.tif", "dsm.tif"],
+                                   orthophoto_extent=TEST_EXTENT, dsm_extent=TEST_EXTENT,
+                                   epsg=32617)
+
+    def _write(self, name):
+        path = os.path.join(self.tmp, name)
+        with open(path, 'wb') as f:
+            f.write(b'GeoTIFF de prueba')
+        return path
+
+    def test_version_is_exposed_through_the_plugin_class(self):
+        from .plugin import Plugin
+        plugin = Plugin()
+        self.assertEqual(plugin.contract_version(), contract.CONTRACT_VERSION)
+        self.assertEqual(contract.CONTRACT_VERSION, 1)
+
+    def test_empty_without_any_realignment(self):
+        task = self._task()
+        self.assertEqual(contract.corrected_rasters(str(task.id)), {})
+
+    def test_empty_while_still_previewing(self):
+        task = self._task()
+        store.set_state(str(task.id), {'state': 'previewing', 'corrected_paths': {}})
+        self.assertEqual(contract.corrected_rasters(str(task.id)), {})
+
+    def test_returns_the_paths_after_applying(self):
+        task = self._task()
+        paths = {'dsm': self._write('dsm.tif'), 'orthophoto': self._write('orthophoto.tif')}
+        store.set_state(str(task.id), {'state': 'applied', 'corrected_paths': paths})
+
+        corrected = contract.corrected_rasters(str(task.id))
+
+        self.assertEqual(sorted(corrected), ['dsm', 'orthophoto'])
+        self.assertEqual(corrected['dsm'], paths['dsm'])
+
+    def test_empty_after_reverting(self):
+        task = self._task()
+        paths = {'dsm': self._write('dsm.tif')}
+        store.set_state(str(task.id), {'state': 'applied', 'corrected_paths': paths})
+        self.assertEqual(len(contract.corrected_rasters(str(task.id))), 1)
+
+        store.set_state(str(task.id), {'state': 'reverted', 'corrected_paths': {}})
+        self.assertEqual(contract.corrected_rasters(str(task.id)), {})
+
+    def test_a_file_missing_from_disk_is_not_offered(self):
+        # El estado y el disco son independientes: un borrado manual del directorio de plugins deja
+        # el documento intacto, y fiarse solo del estado haría abrir una ruta inexistente.
+        task = self._task()
+        dsm = self._write('dsm.tif')
+        store.set_state(str(task.id), {'state': 'applied',
+                                       'corrected_paths': {'dsm': dsm, 'dtm': '/no/existe.tif'}})
+
+        corrected = contract.corrected_rasters(str(task.id))
+
+        self.assertEqual(sorted(corrected), ['dsm'])
+
+    def test_applied_state_without_files_yields_nothing(self):
+        task = self._task()
+        store.set_state(str(task.id), {'state': 'applied',
+                                       'corrected_paths': {'dsm': '/no/existe.tif'}})
+        self.assertEqual(contract.corrected_rasters(str(task.id)), {})
