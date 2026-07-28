@@ -77,8 +77,29 @@ un quiebre real del ruido de un DEM fotogramétrico. Tomar la primera muestra de
 del máximo de pendiente— sitúa el borde en el arranque del quiebre, que es el borde de calzada.
 
 **D3b — Motivos de "sin borde"**: cada lado registra `no_break` (se recorrió todo el semiancho sin
-racha) o `no_data` (el DEM dejó de tener dato antes de completar el recorrido: `nodata`, `NaN`, o
-fuera del ráster). La distinción es requisito (FR-021) y sale gratis del propio recorrido.
+racha), `no_data` (el DEM dejó de tener dato antes de completar el recorrido: `nodata`, `NaN`, o
+fuera del ráster) o `break_at_axis` (la racha arranca sobre el propio eje, así que no hay calzada
+que medir: el trazado no pasa por el camino en ese tramo). La distinción es requisito (FR-021) y
+sale casi gratis del propio recorrido.
+
+`break_at_axis` se añadió durante la implementación, tras verlo en la verificación en worker sobre
+un DSM real: sin él ese caso producía `width: 0.0` marcado como `measured` con la pendiente
+transversal vacía, rompiendo el primer invariante de `data-model.md` §6.
+
+**D3c — No se rellenan huecos del DEM, y no hace falta.** El recorrido transversal se detiene en la
+primera muestra sin dato, sin tolerancia ni interpolación. Se consideró añadir un `max_gap_samples`
+que saltara huecos cortos, pensando en los vacíos típicos de un DEM fotogramétrico. **Medición
+sobre los seis DEM de la instancia de desarrollo (3 tareas × DSM/DTM, hasta 14145×29379 px): cero
+huecos interiores en todos ellos.** El 17–37 % de `nodata` que tienen es íntegramente perímetro
+exterior, fuera de la huella del vuelo. La causa es que ODM ejecuta relleno de huecos al generar el
+DEM (`--dem-gapfill-steps`, 3 por defecto), así que lo que llega a WebODM ya viene cerrado por
+dentro.
+
+Consecuencia: un `no_data` en una transversal no significa "se topó con un píxel malo" sino "el
+recorrido llegó al borde del vuelo", que es justo lo que el motivo comunica. Un parámetro de
+tolerancia sería un mando que nunca se dispara sobre datos reales. Descartado también
+`rasterio.fill.fillnodata` sobre el ráster de entrada: inventaría cotas que entrarían en el ancho y
+en las pendientes sin nada que las distinga de las medidas, en contra de FR-022.
 
 **Alternativas descartadas**:
 
