@@ -12,6 +12,7 @@ de este módulo es la vía más rápida a un ancho medido en grados.
 
 import math
 
+import numpy as np
 import rasterio.warp
 from rasterio.crs import CRS
 from django.utils.translation import gettext_lazy as _
@@ -116,6 +117,28 @@ def point_at_station(coords, cum, station):
             x1, y1 = coords[i]
             return (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t), i - 1
     return (coords[-1][0], coords[-1][1]), max(len(coords) - 2, 0)
+
+
+def points_at_stations(coords, cum, stations):
+    """Versión vectorizada de `point_at_station` para muchas progresivas a la vez.
+
+    El pipeline pide del orden de 10⁴–10⁶ muestras del eje: resolverlas una a una con la búsqueda
+    lineal de `point_at_station` cuesta `O(vértices)` cada una y se nota. Aquí se localizan todas
+    de golpe con `searchsorted` y se interpolan con numpy.
+    """
+    stations = np.asarray(stations, dtype='float64')
+    cum_arr = np.asarray(cum, dtype='float64')
+    xs = np.asarray([c[0] for c in coords], dtype='float64')
+    ys = np.asarray([c[1] for c in coords], dtype='float64')
+
+    clipped = np.clip(stations, 0.0, cum_arr[-1])
+    i = np.clip(np.searchsorted(cum_arr, clipped, side='left'), 1, len(cum_arr) - 1)
+    seg_len = cum_arr[i] - cum_arr[i - 1]
+    # Vértices duplicados dan un tramo de longitud nula: `t = 0` devuelve el vértice, que es la
+    # respuesta correcta, y evita el aviso de división por cero.
+    t = np.where(seg_len > 0, (clipped - cum_arr[i - 1]) / np.where(seg_len > 0, seg_len, 1.0), 0.0)
+    return (xs[i - 1] + (xs[i] - xs[i - 1]) * t,
+            ys[i - 1] + (ys[i] - ys[i - 1]) * t)
 
 
 def substring(coords, cum, station_start, station_end):

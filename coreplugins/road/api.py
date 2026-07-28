@@ -1,19 +1,27 @@
 """Vistas REST del plugin (`contracts/rest-api.md`).
 
 Toda vista extiende `TaskView` y resuelve el acceso con `get_and_check_task`; las que modifican
-estado añaden `check_project_perms(..., ('change_project',))`, igual que `realign`.
+estado añaden `check_project_perms(..., ('change_project',))`, igual que `realign`. Un fallo de
+permiso sale como `404` y no como `403`: es lo que hace `check_project_perms` del core,
+deliberadamente, para no revelar que la tarea existe.
 
 Los errores viajan siempre con la misma forma, `{"error", "code"}`: el frontend distingue por
 `code` y muestra `error`, de modo que cambiar la redacción de un mensaje no rompe la interfaz.
 """
 
+import datetime
+import uuid
+
 from rest_framework import status
 from rest_framework.response import Response
 from django.utils.translation import gettext_lazy as _
 
+from app.api.common import check_project_perms
 from app.plugins.views import TaskView
+from app.plugins.worker import run_function_async
 
-from . import geometry, sources
+from . import axis as axis_module
+from . import compute, geometry, sources, store
 
 # Códigos de error de `contracts/rest-api.md`.
 ERR_INVALID_PARAMETER = 'invalid_parameter'
@@ -36,12 +44,89 @@ def no_elevation_model():
     return error(_('La tarea no tiene DSM ni DTM.'), ERR_NO_ELEVATION_MODEL)
 
 
+def _now():
+    return datetime.datetime.utcnow().isoformat() + 'Z'
+
+
+def _abort_celery_task(celery_task_id):
+    from worker.tasks import TestSafeAsyncResult
+    res = TestSafeAsyncResult(celery_task_id)
+    if not res.ready():
+        res.backend.store_result(celery_task_id, result=None, state="ABORTED", traceback=None)
+
+
+def _analysis_response(task, analysis):
+    """Entrada del índice más el estado derivado `stale` (`data-model.md` §2)."""
+    payload = dict(analysis)
+    payload['stale'] = sources.is_stale(task, analysis)
+    return payload
+
+
+def _resolve_model_and_variant(task, data):
+    """`(model, variant, described, error_response)` a partir del cuerpo de la petición."""
+    models = sources.available_models(task)
+    if not models:
+        return None, None, None, no_elevation_model()
+
+    model = data.get('model') or sources.default_model(task)
+    if model not in models:
+        return None, None, None, error(
+            _('El modelo %(model)s no está disponible en esta tarea.') % {'model': model},
+            ERR_INVALID_PARAMETER)
+
+    variant = data.get('variant') or sources.VARIANT_ORIGINAL
+    if variant not in sources.available_variants(task, model):
+        return None, None, None, error(
+            _('La variante %(variant)s no está disponible para este modelo.') % {
+                'variant': variant},
+            ERR_UNAVAILABLE_VARIANT)
+
+    try:
+        described = sources.describe(task, model, variant)
+    except Exception as e:
+        return None, None, None, error(
+            _('No se pudo leer el modelo de elevación: %(err)s') % {'err': e},
+            ERR_NO_ELEVATION_MODEL)
+
+    return model, variant, described, None
+
+
+def _resolve_axis(task, data, described):
+    """`(axis_source, nombre_sugerido, error_response)`.
+
+    De momento solo la vía de anotación; la del archivo subido llega en US4 y entra por aquí sin
+    tocar el resto del flujo.
+    """
+    spec = data.get('axis') or {}
+    kind = spec.get('kind') or axis_module.KIND_ANNOTATION
+    ref = spec.get('ref')
+
+    if kind != axis_module.KIND_ANNOTATION:
+        return None, None, error(_('Origen de eje no admitido: %(kind)s.') % {'kind': kind},
+                                 ERR_INVALID_AXIS)
+    if not ref:
+        return None, None, error(_('Falta la referencia del eje.'), ERR_INVALID_AXIS)
+
+    try:
+        source, name = axis_module.axis_source_from_annotation(
+            str(task.id), ref, described['crs'], described['unit_factor'])
+    except axis_module.InvalidAxis as e:
+        return None, None, error(e, ERR_INVALID_AXIS)
+
+    if source is None:
+        return None, None, error(
+            _('No se encontró una polilínea 2D con la referencia %(ref)s en esta tarea.') % {
+                'ref': ref},
+            ERR_INVALID_AXIS)
+    return source, name, None
+
+
 class Capabilities(TaskView):
     """`GET task/<pk>/capabilities`: qué puede ofrecer el plugin sobre esta tarea.
 
-    Existe para que el panel se dibuje sin opciones muertas: los modelos que hay, las variantes
-    por modelo, los ejes disponibles y los rangos de parámetros —cuyo suelo depende de la
-    resolución del ráster— salen de aquí y no de constantes duplicadas en el frontend.
+    Existe para que el panel se dibuje sin opciones muertas: los modelos que hay, las variantes por
+    modelo, los ejes disponibles y los rangos de parámetros —cuyo suelo depende de la resolución
+    del ráster— salen de aquí y no de constantes duplicadas en el frontend.
     """
 
     def get(self, request, pk=None):
@@ -65,10 +150,163 @@ class Capabilities(TaskView):
             'variants': {m: sources.available_variants(task, m) for m in models},
             'resolution': resolution,
             'vertical_unit': described['vertical_unit'],
-            'annotations_available': False,
-            'axes': [],
+            'annotations_available': axis_module.annotations_available(),
+            'axes': axis_module.describe_axes(str(task.id), described['crs'],
+                                              described['unit_factor']),
             'defaults': sources.defaults_for(resolution),
             'ranges': sources.ranges_for(resolution),
             'max_vertices': geometry.MAX_VERTICES,
             'max_upload_bytes': sources.MAX_UPLOAD_BYTES,
         }, status=status.HTTP_200_OK)
+
+
+class AnalysisList(TaskView):
+    """`GET`/`POST task/<pk>/analyses`."""
+
+    def get(self, request, pk=None):
+        task = self.get_and_check_task(request, pk)
+        return Response({
+            'running': store.get_running(str(task.id)),
+            'analyses': [_analysis_response(task, a) for a in store.list_analyses(str(task.id))],
+        }, status=status.HTTP_200_OK)
+
+    def post(self, request, pk=None):
+        task = self.get_and_check_task(request, pk)
+        check_project_perms(request, task.project, ('change_project',))
+
+        data = request.data
+        model, variant, described, failure = _resolve_model_and_variant(task, data)
+        if failure is not None:
+            return failure
+
+        params, err = sources.validate_params(data.get('params'), described['resolution'])
+        if err:
+            return error(err, ERR_INVALID_PARAMETER)
+
+        source, suggested_name, failure = _resolve_axis(task, data, described)
+        if failure is not None:
+            return failure
+
+        estimate = compute.estimate(source['plan_length'], params)
+
+        analysis_id = str(uuid.uuid4())
+        acquired, running = store.acquire_running(str(task.id), analysis_id)
+        if not acquired:
+            return error(_('Ya hay un análisis en curso en esta tarea.'), ERR_ANALYSIS_RUNNING,
+                         status.HTTP_409_CONFLICT,
+                         running_analysis_id=running.get('analysis_id'))
+
+        try:
+            analysis = {
+                'id': analysis_id,
+                'name': (data.get('name') or suggested_name or _('Camino'))[:255],
+                'axis': source,
+                'model': model,
+                'variant': variant,
+                'params': params,
+                'color_thresholds': list(sources.COLOR_THRESHOLDS_DEFAULT),
+                'status': 'running',
+                'progress': 0.0,
+                'error': None,
+                'celery_task_id': None,
+                'source_mtime': sources.source_mtime(task, model, variant),
+                'summary': None,
+                'created_at': _now(),
+                'updated_at': _now(),
+                'created_by': request.user.id,
+            }
+            store.upsert_analysis(str(task.id), analysis)
+
+            async_result = run_function_async(
+                compute.run_analysis,
+                str(task.id), analysis_id, described['path'], source['vertices'], params,
+                analysis['source_mtime'],
+                with_progress=True, with_cancel=True,
+            )
+        except Exception:
+            # Sin esto, un fallo al lanzar deja el candado tomado y la tarea inutilizable.
+            store.release_running(str(task.id), analysis_id)
+            raise
+
+        # Bajo `CELERY_TASK_ALWAYS_EAGER` (tests) el trabajo ya terminó y escribió su estado final
+        # antes de que volvamos aquí: anotar el id entonces resucitaría un candado ya liberado y
+        # dejaría un `celery_task_id` en un análisis completado, que el botón de cancelar leería
+        # como "todavía se puede parar".
+        def attach(analysis):
+            if analysis.get('status') == 'running':
+                analysis['celery_task_id'] = async_result.task_id
+            return analysis
+
+        store.attach_celery_task(str(task.id), analysis_id, async_result.task_id)
+        store.update_analysis(str(task.id), analysis_id, attach)
+
+        return Response({'analysis_id': analysis_id, 'celery_task_id': async_result.task_id,
+                         'estimate': estimate}, status=status.HTTP_202_ACCEPTED)
+
+
+class AnalysisDetail(TaskView):
+    """`GET task/<pk>/analyses/<analysis_id>`: el análisis con sus tramos."""
+
+    def get(self, request, pk=None, analysis_id=None):
+        task = self.get_and_check_task(request, pk)
+        analysis = store.get_analysis(str(task.id), analysis_id)
+        if analysis is None:
+            return error(_('El análisis no existe en esta tarea.'), ERR_NOT_FOUND,
+                         status.HTTP_404_NOT_FOUND)
+
+        payload = _analysis_response(task, analysis)
+        payload['segments'] = []
+
+        if analysis.get('status') == 'completed':
+            document = store.read_segments(str(task.id), analysis_id)
+            if document is None:
+                return error(_('El resultado de este análisis ya no está disponible.'),
+                             ERR_RESULT_MISSING, status.HTTP_410_GONE)
+            payload['segments'] = document.get('segments', [])
+
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class AnalysisCancel(TaskView):
+    """`POST task/<pk>/analyses/<analysis_id>/cancel`.
+
+    Idempotente: sobre un análisis que ya terminó responde `200` sin cambiar nada. No conserva
+    resultado parcial (FR-034).
+    """
+
+    def post(self, request, pk=None, analysis_id=None):
+        task = self.get_and_check_task(request, pk)
+        check_project_perms(request, task.project, ('change_project',))
+
+        analysis = store.get_analysis(str(task.id), analysis_id)
+        if analysis is None:
+            return error(_('El análisis no existe en esta tarea.'), ERR_NOT_FOUND,
+                         status.HTTP_404_NOT_FOUND)
+
+        if analysis.get('status') == 'running':
+            cancel_analysis(task, analysis)
+            analysis = store.get_analysis(str(task.id), analysis_id)
+
+        return Response(_analysis_response(task, analysis), status=status.HTTP_200_OK)
+
+
+def cancel_analysis(task, analysis):
+    """Aborta la tarea de Celery, marca `canceled`, borra el parcial y libera el candado."""
+    analysis_id = analysis['id']
+    celery_task_id = analysis.get('celery_task_id')
+    if celery_task_id:
+        try:
+            _abort_celery_task(celery_task_id)
+        except Exception:
+            # Sin backend de resultados no se puede abortar, pero el estado sí debe quedar limpio.
+            pass
+
+    store.delete_segments(str(task.id), analysis_id)
+
+    def mutate(a):
+        a.update({'status': 'canceled', 'progress': None, 'celery_task_id': None,
+                  'updated_at': _now()})
+        return a
+
+    store.update_analysis(str(task.id), analysis_id, mutate)
+    store.release_running(str(task.id), analysis_id)

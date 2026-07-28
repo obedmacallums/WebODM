@@ -1,7 +1,7 @@
 from app.plugins import PluginBase
 from app.plugins import MountPoint
 
-from .api import Capabilities
+from .api import AnalysisCancel, AnalysisDetail, AnalysisList, Capabilities
 from . import signals  # noqa: F401 - registra el receptor de task_removed (borrado en cascada)
 
 
@@ -19,4 +19,9 @@ class Plugin(PluginBase):
         # genérico de '<analysis_id>' cuando coinciden en forma.
         return [
             MountPoint('task/(?P<pk>[^/.]+)/capabilities$', Capabilities.as_view()),
+            MountPoint('task/(?P<pk>[^/.]+)/analyses$', AnalysisList.as_view()),
+            MountPoint('task/(?P<pk>[^/.]+)/analyses/(?P<analysis_id>[^/.]+)/cancel$',
+                       AnalysisCancel.as_view()),
+            MountPoint('task/(?P<pk>[^/.]+)/analyses/(?P<analysis_id>[^/.]+)$',
+                       AnalysisDetail.as_view()),
         ]
