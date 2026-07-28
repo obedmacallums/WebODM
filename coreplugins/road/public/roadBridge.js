@@ -89,28 +89,55 @@ function buildGroup(segments, thresholds){
 // responder al click. Se resuelve con **una sola** línea de realce reutilizable que adopta la
 // geometría del tramo activo — no con un contorno por tramo, que multiplicaría los layers por dos.
 
+// El realce son **dos** capas superpuestas y ninguna de ellas es el tramo:
+//
+//   contorno  blanco y ancho, por encima de todos los tramos -> recorta a los vecinos y hace
+//             visible dónde empieza y acaba el tramo activo
+//   calco     el color del tramo, encima del contorno -> devuelve el semáforo a la vista
+//
+// Ambas son `interactive: false`, así que no participan en el hit testing y el tramo de debajo
+// sigue recibiendo el hover y el click.
+//
+// La versión anterior subía el propio tramo al frente con `bringToFront()` y **rompía el click**:
+// eso reinserta en el DOM el mismo nodo que el usuario va a pulsar (medido: saltaba de la posición
+// 30 a la 60 entre sus hermanos), el navegador dispara `mouseout`+`mouseover` al reinsertarlo —lo
+// que reencadenaba el resalte en bucle— y un `click` no llega a formarse porque `mousedown` y
+// `mouseup` caen sobre un nodo que se movió en medio. El elemento interactivo no se toca nunca.
 let haloLayer = null;
-let pinnedLayer = null;   // tramo cuyo popup está abierto: conserva el contorno al mover el ratón
+let capLayer = null;
+let hoveredLayer = null;
+let pinnedLayer = null;   // tramo cuyo popup está abierto: conserva el realce al mover el ratón
 
 function showHalo(map, layer){
   if (!layer || !layer._roadSegment) return false;
+  if (hoveredLayer === layer && haloLayer && haloLayer._map) return true;
 
-  if (!haloLayer) haloLayer = L.polyline([], haloStyleFor(layer._roadSegment));
-  haloLayer.setLatLngs(layer.getLatLngs());
-  haloLayer.setStyle(haloStyleFor(layer._roadSegment));
+  const segment = layer._roadSegment;
+  const latlngs = layer.getLatLngs();
+
+  if (!haloLayer) haloLayer = L.polyline([], haloStyleFor(segment));
+  if (!capLayer) capLayer = L.polyline([], {interactive: false});
+
+  haloLayer.setLatLngs(latlngs);
+  haloLayer.setStyle(haloStyleFor(segment));
+  capLayer.setLatLngs(latlngs);
+  capLayer.setStyle(Object.assign({}, layer.options, {interactive: false}));
+
   if (!map.hasLayer(haloLayer)) haloLayer.addTo(map);
+  if (!map.hasLayer(capLayer)) capLayer.addTo(map);
 
-  // El orden es lo que hace visible la separación: el contorno sube por encima de **todos** los
-  // tramos (incluidos los vecinos, que así quedan recortados por su blanco) y acto seguido el
-  // tramo activo sube por encima del contorno, conservando su color. Invertir estas dos líneas
-  // deja el blanco tapando el semáforo.
+  // Contorno primero y calco después: invertirlas deja el blanco tapando el color.
   haloLayer.bringToFront();
-  layer.bringToFront();
+  capLayer.bringToFront();
+
+  hoveredLayer = layer;
   return true;
 }
 
 function hideHalo(){
   if (haloLayer && haloLayer._map) haloLayer.remove();
+  if (capLayer && capLayer._map) capLayer.remove();
+  hoveredLayer = null;
   return true;
 }
 
@@ -176,10 +203,18 @@ function groupFor(analysisId){
 function applyThresholds(analysisId, thresholds){
   const group = groupFor(analysisId);
   if (!group) return false;
-  registry.get(group).thresholds = thresholds;
+  const meta = registry.get(group);
+  meta.thresholds = thresholds;
   group.eachLayer(layer => {
     if (layer._roadSegment) layer.setStyle(styleForSegment(layer._roadSegment, thresholds));
   });
+  // El calco lleva una copia del color del tramo, así que un recoloreado con el cursor encima lo
+  // dejaría mostrando el color anterior sobre un tramo que ya cambió.
+  if (hoveredLayer && group.hasLayer(hoveredLayer)){
+    const layer = hoveredLayer;
+    hoveredLayer = null;   // fuerza el refresco: si no, el guardia de `showHalo` lo daría por hecho
+    showHalo(meta.map, layer);
+  }
   return true;
 }
 

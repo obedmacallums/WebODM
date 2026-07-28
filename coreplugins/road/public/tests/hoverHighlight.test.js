@@ -114,6 +114,37 @@ test('el contorno NO es interactivo, o se comería el click', () => {
   layers[0].fire('mouseout');
 });
 
+test('el tramo interactivo NO se mueve en el DOM al resaltarlo', () => {
+  // Regresión: la primera versión subía el propio tramo al frente con `bringToFront()`. Eso
+  // reinserta el nodo que el usuario va a pulsar —medido en el navegador: saltaba de la posición
+  // 30 a la 60 entre sus hermanos—, el navegador dispara `mouseout`+`mouseover` al reinsertarlo y
+  // el `click` no llega a formarse porque `mousedown` y `mouseup` caen en un nodo que se movió.
+  // El popup dejó de abrirse por completo.
+  const path = layers[1]._path;
+  const siblings = () => [...path.parentNode.children].indexOf(path);
+  const antes = siblings();
+
+  layers[1].fire('mouseover');
+
+  assert.strictEqual(siblings(), antes,
+    'el tramo cambió de sitio entre sus hermanos: el click volverá a romperse');
+  layers[1].fire('mouseout');
+});
+
+test('el calco devuelve el color del tramo por encima del contorno, sin ser interactivo', () => {
+  layers[1].fire('mouseover');
+  const path = layers[1]._path;
+  const encima = [...path.parentNode.children].filter(el => el.getAttribute('stroke') === '#d9422b');
+
+  // Dos trazos rojos: el propio tramo y su calco. Sin el calco, el blanco del contorno taparía
+  // el semáforo del tramo activo.
+  assert.strictEqual(encima.length, 2, 'falta el calco con el color del tramo');
+  assert.ok(encima.every(el => !el.classList.contains('leaflet-interactive') ||
+                               el === path),
+    'el calco no puede ser interactivo o robaría el click');
+  layers[1].fire('mouseout');
+});
+
 test('el contorno es blanco y más ancho que el tramo', () => {
   layers[0].fire('mouseover');
   const h = halo();
