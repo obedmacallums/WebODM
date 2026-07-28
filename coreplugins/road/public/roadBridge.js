@@ -1,7 +1,7 @@
 import L from 'leaflet';
 import PluginsAPI from 'webodm/classes/plugins/API';
 import { _ } from 'webodm/classes/gettext';
-import { styleForSegment, reasonLabel, haloStyleFor } from './segmentStyle';
+import { styleForSegment, reasonLabel, haloStyleFor, hitStyle } from './segmentStyle';
 
 // Diálogo con el bus de anotaciones del core (`contracts/consumed-contracts.md` §3).
 //
@@ -72,12 +72,24 @@ function popupHtml(segment){
   </div>`;
 }
 
+// Cada tramo son **dos** capas: la que se ve y un área de captura invisible y mucho más ancha
+// (`hitStyle`, con el porqué medido). La interactiva es la segunda —el hover, el click y el popup
+// van por ella—, así que es también la que lleva el `_roadSegment` con el que el resto del bridge
+// reconoce lo suyo; la visible se dibuja ya sin interacción y se alcanza desde `_roadLine`.
 function buildGroup(segments, thresholds){
-  const layers = segments.map(segment => {
-    const line = L.polyline(toLatLngs(segment.geometry), styleForSegment(segment, thresholds));
-    line.bindPopup(popupHtml(segment));
-    line._roadSegment = segment;
-    return line;
+  const layers = [];
+  segments.forEach(segment => {
+    const latlngs = toLatLngs(segment.geometry);
+
+    const line = L.polyline(latlngs, Object.assign({}, styleForSegment(segment, thresholds),
+                                                   {interactive: false}));
+
+    const hit = L.polyline(latlngs, hitStyle());
+    hit.bindPopup(popupHtml(segment));
+    hit._roadSegment = segment;
+    hit._roadLine = line;
+
+    layers.push(line, hit);
   });
   return L.featureGroup(layers);
 }
@@ -114,6 +126,9 @@ function showHalo(map, layer){
 
   const segment = layer._roadSegment;
   const latlngs = layer.getLatLngs();
+  // El hover llega por el área de captura, que es invisible: el color del calco sale del tramo
+  // visible al que representa.
+  const visible = layer._roadLine || layer;
 
   if (!haloLayer) haloLayer = L.polyline([], haloStyleFor(segment));
   if (!capLayer) capLayer = L.polyline([], {interactive: false});
@@ -121,7 +136,7 @@ function showHalo(map, layer){
   haloLayer.setLatLngs(latlngs);
   haloLayer.setStyle(haloStyleFor(segment));
   capLayer.setLatLngs(latlngs);
-  capLayer.setStyle(Object.assign({}, layer.options, {interactive: false}));
+  capLayer.setStyle(Object.assign({}, visible.options, {interactive: false}));
 
   if (!map.hasLayer(haloLayer)) haloLayer.addTo(map);
   if (!map.hasLayer(capLayer)) capLayer.addTo(map);
@@ -143,6 +158,8 @@ function hideHalo(){
 
 function attachHighlight(map, group){
   group.eachLayer(layer => {
+    // Solo las áreas de captura: la línea visible ya no recibe eventos.
+    if (!layer._roadSegment) return;
     layer.on('mouseover', () => showHalo(map, layer));
     layer.on('mouseout', () => {
       // Con un popup abierto el contorno vuelve a su tramo en vez de desaparecer: si no, al mover
@@ -206,7 +223,8 @@ function applyThresholds(analysisId, thresholds){
   const meta = registry.get(group);
   meta.thresholds = thresholds;
   group.eachLayer(layer => {
-    if (layer._roadSegment) layer.setStyle(styleForSegment(layer._roadSegment, thresholds));
+    // Se recolorea la línea visible; el área de captura es invisible y se queda como está.
+    if (layer._roadLine) layer._roadLine.setStyle(styleForSegment(layer._roadSegment, thresholds));
   });
   // El calco lleva una copia del color del tramo, así que un recoloreado con el cursor encima lo
   // dejaría mostrando el color anterior sobre un tramo que ya cambió.

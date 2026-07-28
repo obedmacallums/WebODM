@@ -53,7 +53,8 @@ currentOwner = 'road';
 const road = loadModule('roadBridge.js', {
   L, PluginsAPI, $, _: (s) => s,
   styleForSegment: style.styleForSegment,
-  reasonLabel: style.reasonLabel
+  reasonLabel: style.reasonLabel,
+  hitStyle: style.hitStyle
 });
 road.initBridge();
 

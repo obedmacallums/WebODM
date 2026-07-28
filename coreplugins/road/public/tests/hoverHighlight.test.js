@@ -1,12 +1,16 @@
-/* Resaltado del tramo bajo el cursor.
+/* Poder señalar un tramo, y que se note cuál está señalado.
  *
  * Un análisis de 1 km son ~200 polilíneas contiguas y dos tramos del mismo color parecen una sola
  * línea: sin resaltado no se ve dónde acaba uno y empieza el siguiente, ni qué tramo va a
  * responder al click.
  *
- * Lo que más importa comprobar aquí no es que el contorno aparezca, sino sus dos condiciones de
- * corrección: que **no sea interactivo** —o se coloca bajo el cursor y se come el click, que es lo
- * único que ya funcionaba— y que haya **uno solo** reutilizado, no un contorno por tramo.
+ * Son dos cosas distintas y las dos se comprueban aquí:
+ *
+ *   - el **área de captura**, que es lo que hace posible ponerse encima del tramo. Medido en el
+ *     navegador: el trazo visible de 6 px solo responde a ±2 px de su eje, y en los tramos
+ *     discontinuos los huecos no reciben nada. Sin un área ancha e invisible, acertar es puntería.
+ *   - el **contorno**, con sus dos condiciones de corrección: que no sea interactivo —o se coloca
+ *     bajo el cursor y se come el click— y que haya uno solo reutilizado, no uno por tramo.
  */
 const assert = require('assert');
 const {setupDom, loadModule, createMap, test, summary} = require('./harness');
@@ -42,7 +46,8 @@ const bridge = loadModule('roadBridge.js', {
   L, PluginsAPI, $, _: (s) => s,
   styleForSegment: style.styleForSegment,
   reasonLabel: style.reasonLabel,
-  haloStyleFor: style.haloStyleFor
+  haloStyleFor: style.haloStyleFor,
+  hitStyle: style.hitStyle
 });
 bridge.initBridge();
 
@@ -72,9 +77,53 @@ function publish(segments){
 const segments = [segment(0), segment(1, {grade: 20}),
                   segment(2, {status: 'no_edge', left_reason: 'no_break'})];
 const group = publish(segments);
-const layers = group.getLayers();
+
+// Cada tramo son dos capas: la visible y su área de captura invisible. La interactiva —la que
+// recibe el hover, el click y el popup— es la segunda, y es la que lleva el `_roadSegment`.
+const layers = group.getLayers().filter(l => l._roadSegment);
+const lines = group.getLayers().filter(l => !l._roadSegment);
 
 function halo(){ return bridge.currentHalo(); }
+
+// --- Área de captura: poder ponerse encima -----------------------------------------------------
+
+test('cada tramo trae un área de captura mucho más ancha que su trazo', () => {
+  assert.strictEqual(layers.length, segments.length, 'un área por tramo');
+  layers.forEach((hit, i) => {
+    const visible = style.styleForSegment(segments[i], [8, 12]);
+    assert.ok(hit.options.weight >= visible.weight * 3,
+      'el área del tramo ' + i + ' mide ' + hit.options.weight +
+      ' px frente a los ' + visible.weight + ' del trazo: sigue haciendo falta puntería');
+  });
+});
+
+test('el área no se pinta, así que el mapa se ve exactamente igual', () => {
+  assert.strictEqual(layers[0].options.opacity, 0);
+  assert.strictEqual(layers[0]._path.getAttribute('stroke-opacity'), '0');
+});
+
+test('el trazo visible ya no recibe eventos: el que los recibe es el área', () => {
+  // Si los dos fueran interactivos daría igual quién gana, pero el visible es el estrecho: dejarlo
+  // fuera es lo que garantiza que el cursor entre siempre por el ancho.
+  lines.forEach((line, i) => assert.strictEqual(line.options.interactive, false,
+    'el trazo visible del tramo ' + i + ' sigue siendo interactivo'));
+  layers.forEach(hit => assert.notStrictEqual(hit.options.interactive, false));
+});
+
+test('el área es continua aunque el tramo se dibuje discontinuo', () => {
+  // El caso que peor se comporta hoy: en un tramo sin medir los huecos del trazo no reciben
+  // eventos —el hit testing de SVG solo cuenta lo pintado—, así que casi la mitad de su propio eje
+  // es zona muerta. El área de captura no puede heredar ese patrón.
+  const sinMedir = segments.findIndex(s => s.status !== 'measured');
+  assert.ok(style.styleForSegment(segments[sinMedir], null).dashArray, 'el trazo sí es discontinuo');
+  assert.strictEqual(layers[sinMedir].options.dashArray, null,
+    'el área de captura salió discontinua: los huecos volverían a ser zona muerta');
+});
+
+test('el popup cuelga del área de captura, que es donde aterriza el click', () => {
+  assert.ok(layers[0].getPopup(), 'sin popup en el área, el click no abriría nada');
+  assert.ok(!lines[0].getPopup(), 'el trazo visible no debe llevar popup: ya no recibe clicks');
+});
 
 // --- Aparecer y desaparecer ------------------------------------------------------------------
 
@@ -114,7 +163,7 @@ test('el contorno NO es interactivo, o se comería el click', () => {
   layers[0].fire('mouseout');
 });
 
-test('el tramo interactivo NO se mueve en el DOM al resaltarlo', () => {
+test('el elemento que recibe el click NO se mueve en el DOM al resaltarlo', () => {
   // Regresión: la primera versión subía el propio tramo al frente con `bringToFront()`. Eso
   // reinserta el nodo que el usuario va a pulsar —medido en el navegador: saltaba de la posición
   // 30 a la 60 entre sus hermanos—, el navegador dispara `mouseout`+`mouseover` al reinsertarlo y
@@ -133,15 +182,14 @@ test('el tramo interactivo NO se mueve en el DOM al resaltarlo', () => {
 
 test('el calco devuelve el color del tramo por encima del contorno, sin ser interactivo', () => {
   layers[1].fire('mouseover');
-  const path = layers[1]._path;
-  const encima = [...path.parentNode.children].filter(el => el.getAttribute('stroke') === '#d9422b');
+  const container = layers[1]._path.parentNode;
+  const encima = [...container.children].filter(el => el.getAttribute('stroke') === '#d9422b');
 
   // Dos trazos rojos: el propio tramo y su calco. Sin el calco, el blanco del contorno taparía
   // el semáforo del tramo activo.
   assert.strictEqual(encima.length, 2, 'falta el calco con el color del tramo');
-  assert.ok(encima.every(el => !el.classList.contains('leaflet-interactive') ||
-                               el === path),
-    'el calco no puede ser interactivo o robaría el click');
+  assert.ok(encima.every(el => !el.classList.contains('leaflet-interactive')),
+    'ni el calco ni el trazo pueden ser interactivos: el click es del área de captura');
   layers[1].fire('mouseout');
 });
 
@@ -207,7 +255,7 @@ test('cerrar el popup libera el contorno', () => {
 
 test('despublicar el análisis no deja el contorno flotando', () => {
   const other = publish([segment(0)]);
-  other.getLayers()[0].fire('mouseover');
+  other.getLayers().find(l => l._roadSegment).fire('mouseover');
   assert.ok(halo());
 
   bridge.unpublishAnalysis(other);

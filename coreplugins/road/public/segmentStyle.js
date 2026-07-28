@@ -73,6 +73,31 @@ export function haloStyleFor(segment){
   };
 }
 
+// Área de captura del cursor: una línea invisible y ancha por tramo.
+//
+// El tramo visible es un trazo de 6 px y, medido en el navegador sobre un análisis real, solo
+// responde al cursor a ±2 px de su eje. Los tramos sin medir son peor: su trazo es discontinuo y
+// **los huecos no reciben eventos** —el hit testing de SVG solo cuenta lo pintado—, así que 10 de
+// cada 24 px del propio eje son zona muerta. Con tramos de ~40 px de largo a un zoom de trabajo,
+// pasar el cursor por encima es cuestión de puntería.
+//
+// Un trazo con `stroke-opacity: 0` sigue recibiendo el cursor: lo que cuenta es que tenga `stroke`,
+// no que se vea. Medido: ±10 px con ancho 20, cinco veces el blanco actual.
+export function hitStyle(){
+  return {
+    color: '#ffffff',
+    weight: 20,
+    opacity: 0,
+    // Continua aunque el tramo sea discontinuo: es justo el caso que hoy no se puede señalar.
+    dashArray: null,
+    // `butt` y no `round`: con extremos redondeados cada área rebasaría ~10 px sobre el tramo
+    // vecino y quién se queda la junta lo decidiría el orden en el DOM. Los tramos son contiguos,
+    // así que a tope encajan sin solaparse ni dejar hueco.
+    lineCap: 'butt',
+    interactive: true
+  };
+}
+
 // Etiqueta legible del motivo por el que un lado no tiene borde (FR-021).
 //
 // Los tres motivos describen problemas distintos con soluciones distintas: retocar el umbral de

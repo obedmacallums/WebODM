@@ -40,7 +40,8 @@ const style = loadModule('segmentStyle.js', {});
 const bridge = loadModule('roadBridge.js', {
   L, PluginsAPI, $, _: (s) => s,
   styleForSegment: style.styleForSegment,
-  reasonLabel: style.reasonLabel
+  reasonLabel: style.reasonLabel,
+  hitStyle: style.hitStyle
 });
 
 const map = {addLayer(){}, hasLayer(){ return true; }, removeLayer(){}};
@@ -64,6 +65,12 @@ function segment(index, overrides = {}){
   }, overrides);
 }
 
+// Cada tramo son dos capas: el trazo visible y su área de captura invisible, que es la interactiva
+// y la que lleva el `_roadSegment`. El color y el trazo discontinuo viven en la visible.
+function lines(group){
+  return group.getLayers().filter(l => !l._roadSegment);
+}
+
 let seq = 0;
 function publish(taskId = 'task-1', segments = [segment(0), segment(1), segment(2)]){
   seq++;
@@ -78,7 +85,7 @@ test('un análisis se publica como un solo grupo con una polilínea por tramo', 
   busCalls.length = 0;
   const {analysis, group} = publish();
 
-  assert.strictEqual(group.getLayers().length, 3, 'una polilínea por tramo');
+  assert.strictEqual(lines(group).length, 3, 'un trazo visible por tramo');
   const added = busCalls.filter(c => c[0] === 'addAnnotation');
   assert.strictEqual(added.length, 1, 'el análisis entero es UNA anotación para el core');
   // addAnnotation(layer, name, task, stored) -> ['addAnnotation', layer, name, task, stored]
@@ -89,7 +96,7 @@ test('un análisis se publica como un solo grupo con una polilínea por tramo', 
 test('cada polilínea nace con el color de su pendiente', () => {
   const palette = style.colors();
   const {group} = publish('task-1', [segment(0, {grade: 3}), segment(1, {grade: 20})]);
-  const applied = group.getLayers().map(l => l.options.color);
+  const applied = lines(group).map(l => l.options.color);
 
   assert.deepStrictEqual(applied, [palette.ok, palette.alert]);
 });
@@ -101,10 +108,10 @@ test('cambiar los umbrales recolorea sin ninguna petición de datos', () => {
   const {analysis, group} = publish('task-1', [segment(0, {grade: 6})]);
   ajaxUrls.length = 0;
 
-  assert.strictEqual(group.getLayers()[0].options.color, palette.ok);
+  assert.strictEqual(lines(group)[0].options.color, palette.ok);
   assert.strictEqual(bridge.applyThresholds(analysis.id, [4, 5]), true);
 
-  assert.strictEqual(group.getLayers()[0].options.color, palette.alert);
+  assert.strictEqual(lines(group)[0].options.color, palette.alert);
   assert.deepStrictEqual(ajaxUrls, [], 'recolorear no debe pedir nada al servidor (SC-005)');
 });
 
@@ -112,8 +119,8 @@ test('los tramos sin medir conservan su trazo distinguible tras recolorear', () 
   const {analysis, group} = publish('task-1', [segment(0, {status: 'no_coverage', grade: null})]);
   bridge.applyThresholds(analysis.id, [2, 3]);
 
-  assert.ok(group.getLayers()[0].options.dashArray, 'sigue discontinuo');
-  assert.strictEqual(group.getLayers()[0].options.color, style.colors().unknown);
+  assert.ok(lines(group)[0].options.dashArray, 'sigue discontinuo');
+  assert.strictEqual(lines(group)[0].options.color, style.colors().unknown);
 });
 
 test('recolorear un análisis que no está publicado no revienta', () => {

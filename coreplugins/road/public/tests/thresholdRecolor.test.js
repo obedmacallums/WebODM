@@ -38,7 +38,8 @@ const style = loadModule('segmentStyle.js', {});
 const bridge = loadModule('roadBridge.js', {
   L, PluginsAPI, $, _: (s) => s,
   styleForSegment: style.styleForSegment,
-  reasonLabel: style.reasonLabel
+  reasonLabel: style.reasonLabel,
+  hitStyle: style.hitStyle
 });
 bridge.initBridge();
 
@@ -65,12 +66,19 @@ const segments = buildSegments();
 const analysis = {id: 'a1', name: 'Camino largo', color_thresholds: [8, 12]};
 const group = bridge.publishAnalysis(map, {id: 'task-1'}, analysis, segments, {stored: true});
 
-function colorsOf(){
-  return group.getLayers().map(l => l.options.color);
+// Dos capas por tramo: la visible y su área de captura invisible, que es la interactiva y la que
+// lleva el `_roadSegment`. El color vive en la visible.
+function lines(){
+  return group.getLayers().filter(l => !l._roadSegment);
 }
 
-test('el grupo se dibuja con una polilínea por tramo', () => {
-  assert.strictEqual(group.getLayers().length, segments.length);
+function colorsOf(){
+  return lines().map(l => l.options.color);
+}
+
+test('el grupo se dibuja con un trazo y un área de captura por tramo', () => {
+  assert.strictEqual(lines().length, segments.length);
+  assert.strictEqual(group.getLayers().length, segments.length * 2);
 });
 
 test('recolorear no dispara ninguna petición', () => {
@@ -111,7 +119,7 @@ test('cada rango del semáforo se aplica al tramo que le toca', () => {
 test('los tramos sin medir conservan su estilo distinguible tras cualquier umbral', () => {
   [[1, 2], [8, 12], [20, 40]].forEach(thresholds => {
     bridge.applyThresholds('a1', thresholds);
-    group.getLayers().forEach((layer, i) => {
+    lines().forEach((layer, i) => {
       if (segments[i].status === 'measured') return;
       assert.ok(layer.options.dashArray,
         'el tramo ' + i + ' perdió su trazo discontinuo con umbrales ' + thresholds);

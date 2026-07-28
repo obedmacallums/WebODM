@@ -78,6 +78,23 @@ test('un tramo sin cobertura va gris y discontinuo', () => {
   assert.ok(s.dashArray);
 });
 
+// --- Área de captura del cursor ------------------------------------------------------------------
+
+test('el área de captura es invisible, ancha y continua', () => {
+  // Sus tres propiedades responden cada una a algo medido en el navegador: el trazo visible solo
+  // responde a ±2 px de su eje, los huecos de un trazo discontinuo no reciben nada, y un trazo con
+  // opacidad 0 sí recibe el cursor.
+  const hit = style.hitStyle();
+  const visible = style.styleForSegment({status: 'measured', grade: 3}, THRESHOLDS);
+
+  assert.strictEqual(hit.opacity, 0, 'si se viera, taparía el mapa a lo largo de toda la ruta');
+  assert.ok(hit.weight >= visible.weight * 3,
+    'ancho ' + hit.weight + ' frente a los ' + visible.weight + ' del trazo: no basta');
+  assert.strictEqual(hit.dashArray, null, 'discontinua dejaría los huecos como zona muerta');
+  assert.strictEqual(hit.lineCap, 'butt', 'con extremos redondeados invadiría al tramo vecino');
+  assert.strictEqual(hit.interactive, true);
+});
+
 // --- Motivos por lado --------------------------------------------------------------------------
 
 test('cada motivo de "sin borde" tiene su etiqueta y todas son distintas', () => {
