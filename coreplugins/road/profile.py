@@ -20,10 +20,11 @@ import math
 
 import numpy as np
 
-# Motivos de "sin borde" (FR-021). La distinción sale gratis del propio recorrido y es lo que
-# separa "aquí el camino se funde con el terreno" de "aquí no hay datos".
-NO_BREAK = 'no_break'
-NO_DATA = 'no_data'
+# Motivos de "sin borde" (FR-021). La distinción sale casi gratis del propio recorrido y es lo que
+# separa problemas que el usuario resuelve de formas distintas.
+NO_BREAK = 'no_break'          # se recorrió todo el semiancho sin encontrar quiebre
+NO_DATA = 'no_data'            # el DEM se quedó sin dato antes de completar el recorrido
+BREAK_AT_AXIS = 'break_at_axis'  # el terreno se rompe sobre el propio eje: no hay calzada que medir
 
 
 def _clean(xs, ys):
@@ -107,6 +108,12 @@ def _scan_side(distances, elevations, center, direction, threshold, min_consecut
     pendientes locales consecutivas por encima del umbral, no la muestra de pendiente máxima: eso
     sitúa el borde en el arranque del quiebre, que es el borde de calzada, y no a mitad del talud.
     El requisito de racha es lo que separa un quiebre real del ruido de un DEM fotogramétrico.
+
+    Caso aparte: si la racha arranca en el **propio eje**, el borde caería a distancia cero y la
+    "calzada" de ese lado sería un punto. No es un ancho de 0 m: es que el eje no pasa por una
+    calzada en ese tramo (trazado desplazado, o terreno roto ahí mismo). Se reporta como
+    `break_at_axis` en vez de devolver un ancho nulo que además dejaría la pendiente transversal
+    sin muestras que ajustar. Encontrado sobre un DSM real; ningún perfil sintético lo producía.
     """
     n = len(distances)
     if elevations[center] is None:
@@ -135,6 +142,8 @@ def _scan_side(distances, elevations, center, direction, threshold, min_consecut
                 run_start = i
             run_length += 1
             if run_length >= min_consecutive:
+                if run_start == center:
+                    return None, None, BREAK_AT_AXIS
                 return distances[run_start], run_start, None
         else:
             run_length = 0
@@ -151,7 +160,8 @@ def detect_edges(distances, elevations, threshold, min_consecutive):
     `threshold` es el quiebre en % y `min_consecutive` la longitud mínima de la racha.
 
     Devuelve `{'left': {...}, 'right': {...}}`, cada lado con `offset` (distancia **positiva** del
-    eje al borde), `index` (posición en `distances`) y `reason` (`None`, `no_break` o `no_data`).
+    eje al borde), `index` (posición en `distances`) y `reason` (`None`, `no_break`, `no_data` o
+    `break_at_axis`).
     """
     if len(distances) != len(elevations):
         raise ValueError('distances y elevations deben tener la misma longitud')

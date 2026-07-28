@@ -119,9 +119,25 @@ class PipelineTest(ComputeTestBase):
         self.assertIsNone(no_coverage[0]['elevation'])
         self.assertIsNone(no_coverage[0]['grade'])
 
+    def test_axis_off_the_roadway_is_no_edge_not_a_zero_width_road(self):
+        # Calzada de ancho nulo: el terreno cae desde el propio eje. Es la forma que tiene el DEM
+        # cuando el trazado no pasa por el camino, y lo que antes producía `width: 0.0` marcado
+        # como `measured` con la pendiente transversal vacía.
+        segments = self._analyze(dem_kwargs={'half_width_left': 0.0,
+                                             'half_width_right': 0.0})['segments']
+
+        for segment in segments:
+            self.assertEqual(segment['status'], 'no_edge')
+            self.assertIsNone(segment['width'])
+            self.assertIsNone(segment['cross_slope'])
+            self.assertEqual(segment['left_reason'], 'break_at_axis')
+            self.assertEqual(segment['right_reason'], 'break_at_axis')
+
     def test_all_segments_satisfy_the_data_model_invariants(self):
         for dem_kwargs in ({}, {'talud': 0.0}, {'nodata_patch': (200, 220, 0, 480)},
-                           {'half_width_left': 3.0, 'half_width_right': 5.5}):
+                           {'half_width_left': 3.0, 'half_width_right': 5.5},
+                           {'half_width_left': 0.0, 'half_width_right': 0.0},
+                           {'noise': 0.05}):
             with self.subTest(dem=dem_kwargs):
                 for segment in self._analyze(dem_kwargs=dem_kwargs)['segments']:
                     assert_segment_invariants(self, segment)

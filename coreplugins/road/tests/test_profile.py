@@ -110,6 +110,49 @@ class DetectEdgesTest(SimpleTestCase):
 
         self.assertAlmostEqual(edges['left']['offset'], 2.0, places=9)
 
+    def test_break_starting_at_the_axis_is_not_a_zero_width_road(self):
+        # Encontrado sobre un DSM real, no sobre un perfil sintético: el terreno se rompe justo
+        # encima del eje. Sin este caso el borde caía a distancia cero, el tramo salía `measured`
+        # con `width: 0.0` y su pendiente transversal quedaba vacía por falta de muestras entre
+        # bordes, rompiendo el invariante de `data-model.md` §6.
+        def z(d):
+            return 100.0 - 0.5 * abs(d)
+
+        distances, elevations = build_profile(z)
+        edges = profile.detect_edges(distances, elevations, THRESHOLD, MIN_CONSECUTIVE)
+
+        for side in ('left', 'right'):
+            self.assertIsNone(edges[side]['offset'])
+            self.assertIsNone(edges[side]['index'])
+            self.assertEqual(edges[side]['reason'], profile.BREAK_AT_AXIS)
+
+    def test_a_break_one_sample_away_from_the_axis_is_still_a_real_edge(self):
+        # El corte es solo en el eje mismo: una calzada de un paso de ancho sigue siendo calzada.
+        def z(d):
+            if abs(d) <= 0.25 + 1e-9:
+                return 100.0
+            return 100.0 - 0.5 * (abs(d) - 0.25)
+
+        distances, elevations = build_profile(z)
+        edges = profile.detect_edges(distances, elevations, THRESHOLD, MIN_CONSECUTIVE)
+
+        self.assertAlmostEqual(edges['left']['offset'], 0.25, places=9)
+        self.assertAlmostEqual(edges['right']['offset'], 0.25, places=9)
+        self.assertIsNone(edges['left']['reason'])
+
+    def test_break_at_axis_on_one_side_only(self):
+        def z(d):
+            if d >= 0:
+                return 100.0 - 0.5 * d          # se rompe al este desde el eje
+            return 100.0 if d >= -3.0 else 100.0 - 0.5 * (-d - 3.0)
+
+        distances, elevations = build_profile(z)
+        edges = profile.detect_edges(distances, elevations, THRESHOLD, MIN_CONSECUTIVE)
+
+        self.assertEqual(edges['left']['reason'], profile.BREAK_AT_AXIS)
+        self.assertAlmostEqual(edges['right']['offset'], 3.0, places=9)
+        self.assertIsNone(edges['right']['reason'])
+
     def test_mismatched_lengths_are_rejected(self):
         with self.assertRaises(ValueError):
             profile.detect_edges([0.0, 1.0], [100.0], THRESHOLD, MIN_CONSECUTIVE)

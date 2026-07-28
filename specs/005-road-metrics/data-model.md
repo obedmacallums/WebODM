@@ -164,7 +164,20 @@ cancelado a media escritura no deje un JSON truncado.
 | `offset_left`, `offset_right` | float \| null | Distancia del eje a cada borde. `null` en el lado sin borde. |
 | `cross_slope` | float \| null | Pendiente transversal entre bordes, en %. `null` sin ambos bordes. |
 | `status` | enum | `measured` \| `no_edge` \| `no_coverage`. |
-| `left_reason`, `right_reason` | enum \| null | `null` si ese lado tiene borde; si no, `no_break` o `no_data` (FR-021). |
+| `left_reason`, `right_reason` | enum \| null | `null` si ese lado tiene borde; si no, `no_break`, `no_data` o `break_at_axis` (FR-021). |
+
+**Motivos de "sin borde"**:
+
+| Motivo | Qué ocurrió | Qué suele significar |
+|---|---|---|
+| `no_break` | se recorrió todo el semiancho sin encontrar quiebre | el camino se funde con el terreno circundante |
+| `no_data` | el DEM se quedó sin dato antes de completar el recorrido | el vuelo no cubre esa franja |
+| `break_at_axis` | la racha de quiebre arranca sobre el propio eje | el eje no pasa por la calzada en ese tramo |
+
+`break_at_axis` se añadió tras verlo sobre un DSM real: sin él, el borde caía a distancia cero, el
+tramo salía con `width: 0.0` marcado como `measured`, y su `cross_slope` quedaba vacío por falta de
+muestras entre bordes — rompiendo el primer invariante de esta sección. Un ancho de 0 m no es una
+medición: es la señal de que ahí no hay calzada que medir.
 | `edge_left`, `edge_right` | `[lng, lat]` \| null | Punto de borde detectado, para las geometrías auxiliares de la exportación. |
 | `cross_section` | `[[lng, lat], [lng, lat]]` | Extremos de la transversal recorrida, para la exportación. |
 
