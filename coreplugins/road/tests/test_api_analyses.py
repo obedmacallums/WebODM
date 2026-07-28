@@ -232,6 +232,24 @@ class CancelTest(AnalysesApiTestBase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(store.get_analysis(str(task.id), analysis_id)['status'], 'completed')
 
+    def test_sc008_cancel_returns_control_in_under_five_seconds(self):
+        # SC-008. La cancelación es síncrona: aborta la tarea de Celery, limpia el estado y
+        # responde. El worker consulta `should_cancel` una vez por bloque —14 veces en un análisis
+        # de 1 km—, así que lo que el usuario percibe es esta respuesta, no el fin del cálculo.
+        import time
+
+        task = self._task_with_dem()
+        self._login()
+        analysis_id = self._running_analysis(task)
+
+        started = time.time()
+        res = self.client.post(self._url(task, 'analyses/{}/cancel'.format(analysis_id)))
+        elapsed = time.time() - started
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertLess(elapsed, 5.0, 'la cancelación tardó {:.2f} s'.format(elapsed))
+        self.assertEqual(store.get_analysis(str(task.id), analysis_id)['status'], 'canceled')
+
     def test_cancel_requires_change_project(self):
         task = self._task_with_dem()
         analysis_id = self._running_analysis(task)

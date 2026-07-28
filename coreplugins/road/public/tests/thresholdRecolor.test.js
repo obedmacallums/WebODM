@@ -129,4 +129,17 @@ test('los umbrales quedan registrados para el siguiente recoloreado', () => {
   assert.deepStrictEqual(meta.thresholds, [5, 9]);
 });
 
+test('SC-005: el recoloreado completo tarda menos de 2 segundos', () => {
+  // El presupuesto es el del criterio de éxito, no el tiempo esperado: en jsdom, sin renderer de
+  // Leaflet, esto tarda milisegundos. El aserto está para que un cambio futuro que convierta el
+  // recoloreado en algo caro —recrear las polilíneas en vez de hacer setStyle, por ejemplo— falle
+  // aquí y no en las manos del usuario.
+  const started = Date.now();
+  for (let i = 0; i < 10; i++) bridge.applyThresholds('a1', [4 + i * 0.1, 12]);
+  const perPass = (Date.now() - started) / 10;
+
+  assert.ok(perPass < 2000, 'un recoloreado de ' + segments.length +
+    ' tramos tardó ' + perPass.toFixed(1) + ' ms');
+});
+
 summary('thresholdRecolor');

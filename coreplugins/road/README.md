@@ -29,10 +29,52 @@ Documentación completa de diseño en [`specs/005-road-metrics/`](../../specs/00
   con recoloreado inmediato; los umbrales se persisten sin invalidar el cálculo.
 - **Exportación**: CSV (una fila por tramo) y GeoJSON (tramos, transversales y puntos de borde).
 
+## Parámetros de cálculo
+
+| Parámetro | Unidad | Defecto | Rango | Qué controla |
+|---|---|---|---|---|
+| `segment_length` | m | 5,0 | 0,5 – 100 | cada cuánto se corta el eje |
+| `search_half_width` | m | 10,0 | 1 – 50 | hasta dónde se busca el borde a cada lado |
+| `sample_step` | m | `max(resolución, 0,1)` | resolución – 5 | separación entre muestras |
+| `break_threshold` | % | 15,0 | 2 – 200 | pendiente local que cuenta como quiebre |
+| `min_consecutive_samples` | muestras | 3 | 1 – 20 | longitud mínima de la racha de quiebre |
+
+El suelo de `sample_step` es la **resolución del ráster**, no una constante: muestrear más fino que
+el píxel inventa detalle que no existe. Y `segment_length` nunca puede ser menor que `sample_step`,
+o un tramo puede quedarse sin muestras que ajustar. Los valores y rangos vigentes los sirve
+`GET capabilities`, para que el panel no duplique constantes.
+
+`color_thresholds` = `[aviso, alerta]` en %, por defecto `[8, 12]`, con `0 < aviso < alerta ≤ 100`.
+**No interviene en el cálculo**: cambiarlo recolorea en el cliente y se persiste sin invalidar nada.
+
 ## Rutas
 
 Todas cuelgan de `/api/plugins/road/task/<task_id>/…`. Esquema completo, incluidos los códigos de
 error, en [`contracts/rest-api.md`](../../specs/005-road-metrics/contracts/rest-api.md).
+
+| Método y ruta | Qué hace |
+|---|---|
+| `GET capabilities` | modelos, variantes, ejes, defectos y rangos |
+| `GET analyses` | índice de la tarea, sin tramos, más el candado de ejecución |
+| `POST analyses` | lanza un análisis (JSON o `multipart/form-data` con `file`) |
+| `POST analyses/estimate` | coste previo sin lanzar nada |
+| `GET analyses/<id>` | el análisis con sus tramos |
+| `PATCH analyses/<id>` | solo `name` y `color_thresholds` |
+| `DELETE analyses/<id>` | borra índice y archivo de tramos |
+| `POST analyses/<id>/cancel` | cancela; idempotente |
+| `GET analyses/<id>/export?format=csv\|geojson` | descarga |
+
+`?format=` en la exportación necesita desactivar la negociación de contenido de DRF en esa vista:
+`format` es un nombre reservado (`URL_FORMAT_OVERRIDE`) y DRF responde `404` ante un valor que no
+corresponde a ningún renderer, antes de ejecutar la vista.
+
+## Motivos de "sin borde"
+
+| Motivo | Qué ocurrió | Qué suele significar |
+|---|---|---|
+| `no_break` | se recorrió todo el semiancho sin quiebre | el camino se funde con el terreno |
+| `no_data` | el DEM se quedó sin dato | el recorrido llegó al borde del vuelo |
+| `break_at_axis` | el quiebre arranca sobre el propio eje | el eje no pasa por la calzada ahí |
 
 ## Almacenamiento
 
@@ -57,6 +99,17 @@ ambos.
 
 Ambos se obtienen con `get_plugin_by_name` y se degradan en silencio si están ausentes,
 deshabilitados o exponen un contrato mayor del que este plugin sabe leer.
+
+## Rendimiento
+
+El eje se recorre **por bloques de tramos**: por cada bloque se lee una única ventana del ráster a
+un array de numpy y todas sus muestras —eje y transversales— se resuelven por indexación
+vectorizada. `ds.sample()` haría una lectura por punto, que es el cuello de botella directo con
+decenas de miles de muestras. El borde del bloque es además donde se reporta progreso y se
+comprueba la cancelación.
+
+Medido sobre un DTM de 2,2 cm: 1 km de eje con los valores por defecto son 200 tramos y 50.400
+muestras en **0,37 s**, con 14 reportes de progreso.
 
 ## Desarrollo
 

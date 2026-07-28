@@ -28,13 +28,21 @@ from . import geometry, profile
 # cómodamente en la memoria del worker, y el eje solo cubre una franja estrecha de él.
 MAX_WINDOW_PIXELS = 4_000_000
 
-# Tasa de muestras por segundo para la estimación previa (`research.md` D11). Es una constante
-# calibrada, no una medida universal: se recalibra midiendo un análisis real (T055).
-SAMPLES_PER_SECOND = 250_000.0
+# Tasa de muestras por segundo para la estimación previa (`research.md` D11).
+#
+# Calibrada el 2026-07-28 midiendo un análisis real: 1 km de eje con los parámetros por defecto
+# sobre un DTM de 2,2 cm (tarea Noria, 14145×29379 px) da 200 tramos, 50.400 muestras y 0,37 s
+# — unas 135.000 muestras/s. Se deja algo por debajo a propósito: a un usuario al que se le
+# anuncian 22 s y espera 40 le molesta más que al revés.
+SAMPLES_PER_SECOND = 120_000.0
 
 # A partir de aquí la creación pide confirmación explícita. **No es un tope**: sin `confirm` se
 # responde 409 con la estimación, y con `confirm: true` se lanza igual (FR-043).
-WARN_SAMPLES = 2_000_000
+#
+# 8 M de muestras son ~60 s a la tasa medida, que es donde la espera empieza a molestar de verdad.
+# Con los valores por defecto no salta ni en un camino de 10 km (~500.000 muestras): lo que lo
+# dispara es bajar mucho el `sample_step`, que es justamente la decisión que conviene avisar.
+WARN_SAMPLES = 8_000_000
 
 STATUS_MEASURED = 'measured'
 STATUS_NO_EDGE = 'no_edge'

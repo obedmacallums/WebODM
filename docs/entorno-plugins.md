@@ -57,6 +57,35 @@ sin rebuild de imagen:
 - **geopandas**, **fiona** — los wheels incluyen sus libs nativas.
 - **opencv** (`opencv-python-headless`).
 
+## Patrones útiles con los rásteres de una tarea
+
+### Muestreo masivo: leer por ventanas, no punto a punto
+
+`ds.sample()` de `rasterio` hace **una lectura por punto**. Va bien para unas cuantas cotas
+(`annotations` muestrea el eje de una polilínea y le sobra), pero se convierte en el cuello de
+botella en cuanto se pasa de unos miles de muestras. El patrón que sí escala, y que usa
+`coreplugins/road/compute.py`, es:
+
+1. Agrupar las muestras en bloques cuya extensión quepa en un techo de memoria.
+2. Por bloque, leer **una** ventana del ráster a un array de numpy (`ds.read(1, window=...)`).
+3. Resolver todas las muestras del bloque por indexación vectorizada sobre ese array, invirtiendo
+   el `ds.transform` con numpy en vez de llamada a llamada.
+
+Convierte cientos de miles de lecturas en unas pocas decenas, y el borde del bloque es además el
+punto natural para reportar progreso y comprobar cancelación. Medido: 50.400 muestras sobre un DTM
+de 2,2 cm en 0,37 s.
+
+### Los DEM de WebODM no traen huecos interiores
+
+Medido sobre seis DEM reales (3 tareas × DSM/DTM, hasta 14145×29379 px): **cero huecos interiores**.
+El 17–37 % de `nodata` que tienen es íntegramente perímetro exterior, fuera de la huella del vuelo,
+porque ODM ya ejecuta relleno de huecos al generar el DEM (`--dem-gapfill-steps`, 3 por defecto).
+
+Consecuencia para un plugin que muestree: encontrar `nodata` significa "se llegó al borde del
+vuelo", no "se topó con un píxel malo". No hace falta tolerancia a huecos ni
+`rasterio.fill.fillnodata`. Antes de añadir cualquiera de las dos, remedir con
+`scipy.ndimage.binary_fill_holes(~missing)` sobre los DEM concretos del caso.
+
 ## Cómo agregar dependencias nuevas
 
 Seguir la escalera del Principio IV de la constitución

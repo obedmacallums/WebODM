@@ -207,12 +207,12 @@ con cada una y ver los tramos desplazados de forma coherente con la corrección 
 
 ## Phase 8: Polish & Cross-Cutting Concerns
 
-- [ ] T053 [P] Actualizar `coreplugins/road/README.md` con las rutas definitivas, los parámetros y sus rangos, y el comando de tests
-- [ ] T054 [P] Revisar `docs/entorno-plugins.md` y anotar, si procede, el uso de lectura por ventanas con numpy como patrón disponible para plugins que muestreen rásteres de forma masiva
-- [ ] T055 Calibrar la constante de muestras por segundo y el umbral de aviso en `coreplugins/road/compute.py` midiendo un análisis real, para que la estimación de [research.md D11](./research.md) se parezca al tiempo observado y el aviso dispare donde de verdad molesta
-- [ ] T056 Verificar SC-002 con evidencia: ejecutar el escenario 1 de [quickstart.md](./quickstart.md) sobre un camino de 1 km con parámetros por defecto y mostrar el tiempo total por debajo de 2 minutos con progreso visible
-- [ ] T057 Verificar SC-005 y SC-008 con evidencia: ejecutar los escenarios 3 y 5 de [quickstart.md](./quickstart.md) — recoloreado completo por debajo de 2 segundos sin recálculo, y cancelación devolviendo el control en menos de 5 segundos
-- [ ] T058 Comprobar la convivencia en el bus del core entre `coreplugins/road/public/roadBridge.js` y `coreplugins/annotations/public/annotationsBridge.js`: con ambos plugins activos, una acción sobre una anotación ajena no pasa por los manejadores de `road` ni al revés
+- [X] T053 [P] Actualizar `coreplugins/road/README.md` con las rutas definitivas, los parámetros y sus rangos, y el comando de tests
+- [X] T054 [P] Revisar `docs/entorno-plugins.md` y anotar, si procede, el uso de lectura por ventanas con numpy como patrón disponible para plugins que muestreen rásteres de forma masiva
+- [X] T055 Calibrar la constante de muestras por segundo y el umbral de aviso en `coreplugins/road/compute.py` midiendo un análisis real, para que la estimación de [research.md D11](./research.md) se parezca al tiempo observado y el aviso dispare donde de verdad molesta
+- [X] T056 Verificar SC-002 con evidencia: ejecutar el escenario 1 de [quickstart.md](./quickstart.md) sobre un camino de 1 km con parámetros por defecto y mostrar el tiempo total por debajo de 2 minutos con progreso visible
+- [X] T057 Verificar SC-005 y SC-008 con evidencia: ejecutar los escenarios 3 y 5 de [quickstart.md](./quickstart.md) — recoloreado completo por debajo de 2 segundos sin recálculo, y cancelación devolviendo el control en menos de 5 segundos
+- [X] T058 Comprobar la convivencia en el bus del core entre `coreplugins/road/public/roadBridge.js` y `coreplugins/annotations/public/annotationsBridge.js`: con ambos plugins activos, una acción sobre una anotación ajena no pasa por los manejadores de `road` ni al revés
 - [ ] T059 Ejecutar la validación manual completa de [quickstart.md](./quickstart.md) (10 escenarios) y anotar los resultados
 - [ ] T060 Ejecutar la suite completa y mostrar su salida: `./run_tests_in_docker.sh`, más `webodm.sh test backend coreplugins.realign.tests` para confirmar que la ampliación de `realign` no rompió nada
 
