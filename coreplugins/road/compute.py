@@ -140,23 +140,107 @@ def _to_list(values):
     return [None if math.isnan(v) else float(v) for v in values]
 
 
-def _segment_metrics(segment, offsets, params, unit_factor, axis_values, cross_values):
-    """Métricas de un tramo a partir de sus muestras ya leídas."""
-    stations = segment['_stations']
-    fit = profile.fit_grade(stations - stations[0], _to_list(axis_values))
-
+def _section_result(offsets, cross_values, params, unit_factor):
+    """Bordes y ancho de **una** transversal, en metros."""
     cross_list = _to_list(cross_values)
+
+    # El suavizado alimenta SOLO la detección: `cross_slope` y las cotas se siguen midiendo
+    # sobre el dato crudo. `smooth_window` va en metros y los offsets en unidad nativa, de ahí
+    # la conversión; con la ventana a 0 (el defecto) `median_kernel` devuelve 1 y `detect_list`
+    # es el propio perfil — el comportamiento de siempre, muestra a muestra.
+    detect_list = cross_list
+    window = params.get('smooth_window') or 0.0
+    if window > 0 and len(offsets) > 1:
+        kernel = profile.median_kernel(window / unit_factor, offsets[1] - offsets[0])
+        detect_list = profile.median_smooth(cross_list, kernel)
+
     if params.get('edge_mode') == 'surface':
         # La tolerancia es vertical y no se convierte; la semilla es horizontal y va en la unidad
         # de `offsets`, que aquí es la nativa del CRS (`006` D18).
         edges = profile.detect_edges_surface(
-            offsets, cross_list, params['surface_tolerance'],
+            offsets, detect_list, params['surface_tolerance'],
             params['min_consecutive_samples'],
             seed_half_width=profile.SURFACE_SEED_HALF_WIDTH / unit_factor)
     else:
-        edges = profile.detect_edges(offsets, cross_list, params['break_threshold'],
+        edges = profile.detect_edges(offsets, detect_list, params['break_threshold'],
                                      params['min_consecutive_samples'])
+
     left, right = edges['left'], edges['right']
+    offset_left = None if left['offset'] is None else left['offset'] * unit_factor
+    offset_right = None if right['offset'] is None else right['offset'] * unit_factor
+    measured = left['reason'] is None and right['reason'] is None
+
+    if not measured:
+        cross = None
+    elif params.get('edge_mode') == 'surface':
+        # D19: el bombeo ES la pendiente de la referencia ajustada, medida exactamente sobre las
+        # muestras que el criterio consideró calzada.
+        cross = edges['reference']['cross_slope']
+    else:
+        cross = profile.cross_slope(offsets, cross_list, left['index'], right['index'])
+
+    return {
+        'edges': edges,
+        'left': left,
+        'right': right,
+        'offset_left': offset_left,
+        'offset_right': offset_right,
+        'width': offset_left + offset_right if measured else None,
+        'cross_slope': cross,
+        'cross_list': cross_list,
+    }
+
+
+def _representative(sections):
+    """Índice de la transversal que representa al tramo: la de ancho **mediano** entre las que
+    midieron.
+
+    Se elige una sección real y se reporta entera —ancho, lados, bombeo y puntos de borde— en vez
+    de promediar. Promediar produciría un par (izquierda, derecha) que no se midió en ningún punto
+    y unos puntos de borde sintéticos, que no están sobre el terreno; así todo lo que sale del
+    tramo es autoconsistente y `width == offset_left + offset_right` sigue siendo exacto.
+
+    Con un número par de secciones medidas se toma la mediana **baja**, para que siempre sea una
+    sección existente. Si ninguna midió se devuelve la central: sus motivos son los que mejor
+    describen el tramo, que es lo único que hay que reportar entonces.
+    """
+    measured = [i for i, s in enumerate(sections) if s['width'] is not None]
+    if not measured:
+        return len(sections) // 2
+    measured.sort(key=lambda i: sections[i]['width'])
+    return measured[(len(measured) - 1) // 2]
+
+
+def _segment_metrics(segment, offsets, params, unit_factor, axis_values, cross_values):
+    """Métricas de un tramo a partir de sus muestras ya leídas.
+
+    `cross_values` trae **una fila por transversal** del tramo (`data-model.md` §6): una sola con
+    el espaciado apagado, que es el defecto y el comportamiento de siempre.
+    """
+    stations = segment['_stations']
+    fit = profile.fit_grade(stations - stations[0], _to_list(axis_values))
+
+    rows = cross_values.reshape(len(segment['_section_midpoints']), len(offsets))
+    sections = [_section_result(offsets, row, params, unit_factor) for row in rows]
+    pick = _representative(sections)
+    chosen = sections[pick]
+    midpoint = segment['_section_midpoints'][pick]
+
+    # Con la media el resumen no es ninguna transversal concreta, así que tampoco tiene un punto
+    # de medición: se declara el centro del tramo. La sección mediana sigue haciendo de portadora
+    # de lo que necesita una transversal real (los motivos, el perfil, los índices de borde).
+    averaging = (params.get('width_aggregation') == 'mean'
+                 and any(s['width'] is not None for s in sections))
+    if averaging:
+        midpoint = segment['midpoint']
+
+    # La dispersión de lo que se midió: es lo que distingue un tramo uniforme de uno que se
+    # estrecha, y sin ella la mediana escondería justo el defecto que se buscaba.
+    measured_widths = [s['width'] for s in sections if s['width'] is not None]
+
+    edges = chosen['edges']
+    left, right = chosen['left'], chosen['right']
+    cross_list = chosen['cross_list']
 
     if fit is None:
         # Sin al menos dos muestras válidas del eje no hay rasante que ajustar: el tramo no tiene
@@ -173,25 +257,37 @@ def _segment_metrics(segment, offsets, params, unit_factor, axis_values, cross_v
         grade = fit['grade']
         grade_deg = fit['grade_deg']
         left_reason, right_reason = left['reason'], right['reason']
-        offset_left = None if left['offset'] is None else left['offset'] * unit_factor
-        offset_right = None if right['offset'] is None else right['offset'] * unit_factor
+        offset_left = chosen['offset_left']
+        offset_right = chosen['offset_right']
 
         if left_reason is None and right_reason is None:
             status = STATUS_MEASURED
             width = offset_left + offset_right
-            if params.get('edge_mode') == 'surface':
-                # D19: el bombeo ES la pendiente de la referencia ajustada, medida exactamente
-                # sobre las muestras que el criterio consideró calzada.
-                cross = edges['reference']['cross_slope']
-            else:
-                cross = profile.cross_slope(offsets, cross_list, left['index'], right['index'])
+            cross = chosen['cross_slope']
         else:
             status = STATUS_NO_EDGE
             width = None
             cross = None
 
-        edge_left_pt = _edge_point(segment, offsets, left['index'])
-        edge_right_pt = _edge_point(segment, offsets, right['index'])
+        edge_left_pt = _edge_point(midpoint, segment['normal'], offsets, left['index'])
+        edge_right_pt = _edge_point(midpoint, segment['normal'], offsets, right['index'])
+
+        if averaging:
+            # Cada lado se promedia por separado, así que `width == izquierda + derecha` sigue
+            # siendo exacto —la media de las sumas es la suma de las medias— y la regla dibujada
+            # mide lo que dice el popup. Los puntos de borde pasan a ser construidos: no hay
+            # ninguna transversal donde el camino tuviera exactamente estas dos distancias.
+            complete = [s for s in sections if s['width'] is not None]
+            offset_left = sum(s['offset_left'] for s in complete) / len(complete)
+            offset_right = sum(s['offset_right'] for s in complete) / len(complete)
+            width = offset_left + offset_right
+            status = STATUS_MEASURED
+            left_reason = right_reason = None
+            crosses = [s['cross_slope'] for s in complete if s['cross_slope'] is not None]
+            cross = sum(crosses) / len(crosses) if crosses else None
+            info = {'midpoint': midpoint, 'normal': segment['normal']}
+            edge_left_pt = _offset_point(info, offset_left, unit_factor, +1)
+            edge_right_pt = _offset_point(info, offset_right, unit_factor, -1)
 
     return {
         'status': status,
@@ -202,6 +298,17 @@ def _segment_metrics(segment, offsets, params, unit_factor, axis_values, cross_v
         'offset_left': offset_left,
         'offset_right': offset_right,
         'cross_slope': cross,
+        # Cuántas veces se midió el ancho en este tramo y cuántas dieron resultado, más el rango
+        # de lo medido: es el indicador de regularidad que una sola transversal no puede dar.
+        'width_sections': len(sections),
+        'width_measured_sections': len(measured_widths),
+        'width_min': min(measured_widths) if measured_widths else None,
+        'width_max': max(measured_widths) if measured_widths else None,
+        # Todo lo que se reporta sale de esta transversal, así que su punto sobre el eje y su
+        # perfil viajan con ella: es donde se dibuja la regla, desde donde se miden los dos lados
+        # y sobre lo que la coherencia recalcula el bombeo si mueve un borde.
+        '_midpoint': midpoint,
+        '_cross_row': rows[pick],
         'left_reason': left_reason,
         'right_reason': right_reason,
         # Origen por lado (`006` FR-019): en la detección todo borde presente es medido; la
@@ -218,11 +325,11 @@ def _segment_metrics(segment, offsets, params, unit_factor, axis_values, cross_v
     }
 
 
-def _edge_point(segment, offsets, index):
+def _edge_point(midpoint, normal, offsets, index):
     if index is None:
         return None
-    mx, my = segment['midpoint']
-    nx, ny = segment['normal']
+    mx, my = midpoint
+    nx, ny = normal
     d = offsets[index]
     return (mx + d * nx, my + d * ny)
 
@@ -253,18 +360,26 @@ def analyze(dem_path, vertices, params, progress_callback=None, should_cancel=No
         half_width_native = params['search_half_width'] / unit_factor
         step_native = params['sample_step'] / unit_factor
 
+        spacing_native = (params.get('cross_section_spacing') or 0.0) / unit_factor
+
         coords = geometry.project_vertices(vertices, ds.crs)
         segments = geometry.segmentize(coords, seg_len_native)
         offsets = geometry.cross_section_offsets(half_width_native, step_native)
+        cum = geometry.cumulative_stations(coords)
 
         for segment in segments:
             segment['_stations'] = _axis_stations(segment['station_start'],
                                                   segment['station_end'], step_native)
+            # Con el espaciado apagado esto devuelve exactamente el punto medio que `segmentize`
+            # ya había calculado: una transversal por tramo, como siempre.
+            segment['_section_midpoints'] = [
+                geometry.point_at_station(coords, cum, station)[0]
+                for station in geometry.section_stations(segment['station_start'],
+                                                         segment['station_end'], spacing_native)]
 
         block = block_size_for(seg_len_native, half_width_native, resolution)
         total_samples = 0
         results = []
-        cum = geometry.cumulative_stations(coords)
 
         # La reparación necesita ver todos los tramos a la vez y recalcular el bombeo de los que
         # toque, así que cuando está activada se retiene el perfil transversal de cada tramo
@@ -287,10 +402,12 @@ def analyze(dem_path, vertices, params, progress_callback=None, should_cancel=No
                                            sampled['axis'], sampled['cross'])
                 results.append(_build_segment(segment, metrics, offsets, unit_factor))
                 if retained is not None:
+                    # El perfil y el punto de la sección representativa, no los del tramo: la
+                    # reparación mueve bordes sobre la misma transversal que se reportó.
                     retained.append({
-                        'cross': sampled['cross'],
+                        'cross': metrics['_cross_row'],
                         'normal': segment['normal'],
-                        'midpoint': segment['midpoint'],
+                        'midpoint': metrics['_midpoint'],
                         'reference_cross': metrics['_reference_cross'],
                     })
 
@@ -386,7 +503,7 @@ def _unproject_in_place(segments, crs):
             for i, point in enumerate(segment[key]):
                 slots.append((segment, key, i))
                 flat.append(point)
-        for key in ('midpoint', 'edge_left', 'edge_right'):
+        for key in ('midpoint', 'section_midpoint', 'edge_left', 'edge_right'):
             if segment[key] is not None:
                 slots.append((segment, key, None))
                 flat.append(segment[key])
@@ -410,8 +527,14 @@ def _read_block(ds, segments, index, size, offsets, cum, coords):
         xs_all, ys_all = [], []
         for segment in segments[index:index + size]:
             axis_x, axis_y = geometry.points_at_stations(coords, cum, segment['_stations'])
-            cross_xy = geometry.cross_section_points(segment['midpoint'], segment['normal'],
-                                                     offsets)
+            # Una tirada de puntos por transversal, concatenadas: `_segment_metrics` las vuelve a
+            # separar en filas. La ventana de lectura no crece por medir más veces dentro del mismo
+            # tramo —su extensión ya la fijan la longitud del bloque y el semiancho—, así que el
+            # dimensionado de `block_size_for` sigue siendo válido.
+            cross_xy = []
+            for section_midpoint in segment['_section_midpoints']:
+                cross_xy.extend(geometry.cross_section_points(section_midpoint,
+                                                              segment['normal'], offsets))
             chunk.append({'n_axis': axis_x.size, 'n_cross': len(cross_xy)})
             xs_all.extend(axis_x.tolist() + [p[0] for p in cross_xy])
             ys_all.extend(axis_y.tolist() + [p[1] for p in cross_xy])
@@ -442,7 +565,12 @@ def _build_segment(segment, metrics, offsets, unit_factor):
     La geometría sale de aquí todavía en el CRS del ráster; `_unproject_in_place` la pasa a
     EPSG:4326 al final, en una sola operación para todos los tramos.
     """
-    cross_ends = geometry.cross_section_points(segment['midpoint'], segment['normal'],
+    # Dos puntos distintos, y la distinción importa: `midpoint` es el centro del tramo —donde el
+    # cliente planta la regla del ancho, para que las reglas queden regularmente espaciadas— y
+    # `section_midpoint` es dónde se midió de verdad, sobre la transversal representativa. La
+    # transversal exportada y los puntos de borde salen de esta última: son el dato.
+    section_midpoint = metrics['_midpoint']
+    cross_ends = geometry.cross_section_points(section_midpoint, segment['normal'],
                                                [offsets[0], offsets[-1]])
 
     return {
@@ -452,6 +580,7 @@ def _build_segment(segment, metrics, offsets, unit_factor):
         'length': segment['length'] * unit_factor,
         'geometry': [list(p) for p in segment['points']],
         'midpoint': list(segment['midpoint']),
+        'section_midpoint': list(section_midpoint),
         'elevation': metrics['elevation'],
         'grade': metrics['grade'],
         'grade_deg': metrics['grade_deg'],
@@ -459,6 +588,10 @@ def _build_segment(segment, metrics, offsets, unit_factor):
         'offset_left': metrics['offset_left'],
         'offset_right': metrics['offset_right'],
         'cross_slope': metrics['cross_slope'],
+        'width_sections': metrics['width_sections'],
+        'width_measured_sections': metrics['width_measured_sections'],
+        'width_min': metrics['width_min'],
+        'width_max': metrics['width_max'],
         'status': metrics['status'],
         'left_reason': metrics['left_reason'],
         'right_reason': metrics['right_reason'],
@@ -517,10 +650,15 @@ def estimate(plan_length, params):
     segments = max(1, int(math.ceil(plan_length / segment_length - 1e-9)))
     per_cross = int(math.floor(params['search_half_width'] / step + 1e-9)) * 2 + 1
     axis_samples = int(math.ceil(plan_length / step)) + segments
-    samples = segments * per_cross + axis_samples
+    # Las transversales por tramo salen del mismo reparto que usa `geometry.section_stations`, o
+    # el coste anunciado se quedaría corto justo cuando más importa.
+    spacing = params.get('cross_section_spacing') or 0.0
+    per_segment = max(1, int(round(segment_length / spacing))) if spacing > 0 else 1
+    cross_sections = segments * per_segment
+    samples = cross_sections * per_cross + axis_samples
     return {
         'segments': segments,
-        'cross_sections': segments,
+        'cross_sections': cross_sections,
         'samples': samples,
         'estimated_seconds': samples / SAMPLES_PER_SECOND,
         'warn': samples > WARN_SAMPLES,

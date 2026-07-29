@@ -28,6 +28,15 @@ EDGE_MODE_BREAK = 'break'
 EDGE_MODE_SURFACE = 'surface'
 EDGE_MODES = (EDGE_MODE_BREAK, EDGE_MODE_SURFACE)
 
+# Cómo se resume el ancho cuando el tramo se mide en varias transversales. `median` es el defecto
+# y elige una sección **real** —la de ancho mediano— reportándola entera, así que los bordes que
+# se dibujan están sobre el terreno. `mean` promedia los dos lados por separado: es sensible a un
+# solo bache, y sus puntos de borde son sintéticos, pero permite comparar los dos criterios sobre
+# el mismo DEM sin volver a volar.
+WIDTH_AGGREGATION_MEDIAN = 'median'
+WIDTH_AGGREGATION_MEAN = 'mean'
+WIDTH_AGGREGATIONS = (WIDTH_AGGREGATION_MEDIAN, WIDTH_AGGREGATION_MEAN)
+
 # `data-model.md` §4. El defecto de `sample_step` no está aquí porque depende de la resolución del
 # DEM: se resuelve en `defaults_for()`.
 DEFAULTS = {
@@ -42,8 +51,28 @@ DEFAULTS = {
     # 0 = pasada de coherencia desactivada: es lo que garantiza que ningún análisis existente
     # cambie de resultado (`006` FR-012).
     'coherence_window': 0,
+    # Ventana horizontal (m) de la mediana móvil que suaviza el perfil transversal antes de
+    # detectar bordes. 0 = apagado, que es el comportamiento de siempre. Existe por los DTM
+    # fotogramétricos sobre rodadura rugosa (caminos mineros): sus rachas de ruido superan el
+    # filtro de `min_consecutive` y producen bordes falsos pegados al eje.
+    'smooth_window': 0.0,
+    # Separación (m) entre transversales dentro de un tramo. 0 = una sola, en el punto medio, que
+    # es como funcionó siempre. Con un valor positivo el ancho pasa de ser una muestra puntual a
+    # una estadística del tramo: se mide varias veces y se reporta la sección de ancho mediano.
+    # Va aparte de `segment_length` a propósito — acortar el tramo para medir el ancho más a
+    # menudo degradaría la pendiente longitudinal, que se ajusta sobre la base del tramo.
+    'cross_section_spacing': 0.0,
+    'width_aggregation': WIDTH_AGGREGATION_MEDIAN,
 }
 COLOR_THRESHOLDS_DEFAULT = [8.0, 12.0]
+
+# Umbrales del semáforo de ancho. No hay defecto fijo: se deducen del ancho medio del propio
+# análisis (`derive_width_thresholds`), porque la escala de una calle y la de una rampa minera no
+# se parecen. El mínimo sale a `WIDTH_ALERT_FACTOR` del ancho medio —un tramo que pierde una
+# quinta parte de la calzada es lo que hay que ver de un vistazo— y el holgado, al ancho medio.
+WIDTH_ALERT_FACTOR = 0.8
+# Tope de validación: ni el muestreo puede alcanzar más de `2 * search_half_width` (2 x 50 m).
+WIDTH_THRESHOLD_MAX = 100.0
 
 RANGES = {
     'segment_length': (0.5, 100.0),
@@ -53,6 +82,8 @@ RANGES = {
     'min_consecutive_samples': (1, 20),
     'surface_tolerance': (0.02, 0.50),
     'coherence_window': (0, 5),
+    'smooth_window': (0.0, 5.0),
+    'cross_section_spacing': (0.0, 20.0),
 }
 
 MIN_SAMPLE_STEP = 0.1
@@ -211,7 +242,7 @@ def validate_params(params, resolution):
     ranges = ranges_for(resolution)
 
     for key in ('segment_length', 'search_half_width', 'sample_step', 'break_threshold',
-                'surface_tolerance'):
+                'surface_tolerance', 'smooth_window', 'cross_section_spacing'):
         if params.get(key) is None:
             continue
         try:
@@ -237,12 +268,15 @@ def validate_params(params, resolution):
                 'key': key, 'low': low, 'high': high}
         resolved[key] = value
 
-    # Enum, no rango: el mensaje enumera los valores admitidos (`006` FR-004).
-    if params.get('edge_mode') is not None:
-        if params['edge_mode'] not in EDGE_MODES:
-            return None, _('edge_mode debe ser uno de: %(modes)s.') % {
-                'modes': ', '.join(EDGE_MODES)}
-        resolved['edge_mode'] = params['edge_mode']
+    # Enums, no rangos: el mensaje enumera los valores admitidos (`006` FR-004).
+    for key, allowed in (('edge_mode', EDGE_MODES),
+                         ('width_aggregation', WIDTH_AGGREGATIONS)):
+        if params.get(key) is None:
+            continue
+        if params[key] not in allowed:
+            return None, _('%(key)s debe ser uno de: %(modes)s.') % {
+                'key': key, 'modes': ', '.join(allowed)}
+        resolved[key] = params[key]
 
     resolved.pop('color_thresholds', None)
 
@@ -266,3 +300,40 @@ def validate_color_thresholds(value):
     if not (0.0 < warn < alert <= 100.0):
         return None, _('color_thresholds debe cumplir 0 < aviso < alerta <= 100.')
     return [warn, alert], None
+
+
+def validate_width_thresholds(value):
+    """Valida `[mínimo, holgado]` en metros. Devuelve `(valor, error)`.
+
+    Misma forma que `color_thresholds` —dos números ascendentes— y lectura inversa: el semáforo
+    del ancho pinta de rojo por **debajo** del mínimo, porque en un camino quedarse corto de ancho
+    es el problema. Sin tope superior fijo más allá del ancho máximo que el propio muestreo puede
+    alcanzar (`2 * search_half_width`), redondeado al alza.
+    """
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None, _('width_thresholds debe ser una lista de dos números.')
+    try:
+        low, high = float(value[0]), float(value[1])
+    except (TypeError, ValueError):
+        return None, _('width_thresholds debe ser una lista de dos números.')
+    if not (0.0 < low < high <= WIDTH_THRESHOLD_MAX):
+        return None, _('width_thresholds debe cumplir 0 < mínimo < holgado <= %(max)s.') % {
+            'max': WIDTH_THRESHOLD_MAX}
+    return [low, high], None
+
+
+def derive_width_thresholds(mean_width):
+    """Umbrales de ancho deducidos del ancho medio medido, o `None` si no hay ninguno.
+
+    Una constante no puede servir a la vez a una calle de 6 m y a una rampa minera de 25: con
+    umbrales de calle la mina sale toda verde y con umbrales de mina la calle sale toda roja, y en
+    los dos casos el control nace inútil. Deducirlos del propio análisis lo deja centrado en su
+    escala sea cual sea, y el usuario solo mueve el deslizador si su criterio difiere del ancho que
+    el camino ya tiene.
+
+    Se deducen en cada lectura y **no se guardan**: así un recálculo que cambie el ancho medio los
+    vuelve a centrar, mientras que unos umbrales fijados a mano —esos sí guardados— mandan siempre.
+    """
+    if not mean_width or mean_width <= 0:
+        return None
+    return [round(WIDTH_ALERT_FACTOR * mean_width, 2), round(float(mean_width), 2)]

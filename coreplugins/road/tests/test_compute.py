@@ -9,7 +9,7 @@ definición de un resultado que el frontend puede dibujar sin adivinar.
 from django.test import SimpleTestCase
 
 from .. import compute, sources
-from .base import DEM_RES, RoadTestBase, axis_vertices
+from .base import AXIS_STATION_OFFSET, DEM_RES, RoadTestBase, axis_vertices
 
 PARAMS = {
     'segment_length': 5.0,
@@ -95,6 +95,155 @@ class PipelineTest(ComputeTestBase):
             self.assertAlmostEqual(segment['width'], 8.0, places=6)
             self.assertAlmostEqual(segment['offset_left'], 4.0, places=6)
             self.assertAlmostEqual(segment['offset_right'], 4.0, places=6)
+
+    def test_one_section_per_segment_is_still_the_default(self):
+        # Sin `cross_section_spacing` no cambia nada: una transversal por tramo, en su punto medio.
+        segments = self._analyze()['segments']
+
+        for segment in segments:
+            self.assertEqual(segment['width_sections'], 1)
+            self.assertEqual(segment['width_measured_sections'], 1)
+            self.assertAlmostEqual(segment['width_min'], segment['width'], places=9)
+            self.assertAlmostEqual(segment['width_max'], segment['width'], places=9)
+
+    def test_a_single_defect_at_the_midpoint_hijacks_the_whole_segment(self):
+        """El fallo que esto viene a corregir, dejado por escrito: con una sola transversal, un
+        estrechamiento de 1 m que caiga justo en el punto medio se lleva los 5 m del tramo."""
+        # Camino de 8 m estrechado a 4 m entre las progresivas 2 y 3 del eje, que contienen el
+        # punto medio del primer tramo (2,5) pero no el de ningún otro.
+        pinch = (AXIS_STATION_OFFSET + 2.0, AXIS_STATION_OFFSET + 3.0, 2.0, 2.0)
+        segments = self._analyze(dem_kwargs={'pinch': pinch})['segments']
+
+        self.assertAlmostEqual(segments[0]['width'], 4.0, places=6)
+        self.assertAlmostEqual(segments[1]['width'], 8.0, places=6)
+
+    def test_several_sections_report_the_representative_width(self):
+        # El mismo DEM, midiendo cada metro: de las cinco transversales del primer tramo solo una
+        # cae en el estrechamiento, así que la mediana devuelve el ancho real.
+        pinch = (AXIS_STATION_OFFSET + 2.0, AXIS_STATION_OFFSET + 3.0, 2.0, 2.0)
+        segments = self._analyze(dem_kwargs={'pinch': pinch},
+                                 params={'cross_section_spacing': 1.0})['segments']
+
+        first = segments[0]
+        self.assertEqual(first['width_sections'], 5)
+        self.assertAlmostEqual(first['width'], 8.0, places=6)
+        # Y el estrechamiento no se pierde: sigue declarado en la dispersión del tramo.
+        self.assertAlmostEqual(first['width_min'], 4.0, places=6)
+        self.assertAlmostEqual(first['width_max'], 8.0, places=6)
+
+    def test_the_mean_averages_where_the_median_ignores(self):
+        """El seleccionable de agregación, para comparar los dos criterios sobre el mismo DEM.
+        Anchos [8, 8, 4, 8, 8]: la mediana devuelve 8 y la media 7,2 — el bache arrastra."""
+        pinch = (AXIS_STATION_OFFSET + 2.0, AXIS_STATION_OFFSET + 3.0, 2.0, 2.0)
+        dem = {'pinch': pinch}
+
+        median = self._analyze(dem_kwargs=dem,
+                               params={'cross_section_spacing': 1.0})['segments'][0]
+        mean = self._analyze(dem_kwargs=dem,
+                             params={'cross_section_spacing': 1.0,
+                                     'width_aggregation': 'mean'})['segments'][0]
+
+        self.assertAlmostEqual(median['width'], 8.0, places=6)
+        self.assertAlmostEqual(mean['width'], 7.2, places=6)
+        # La dispersión no depende del criterio: describe lo medido, no cómo se resume.
+        for segment in (median, mean):
+            self.assertAlmostEqual(segment['width_min'], 4.0, places=6)
+            self.assertAlmostEqual(segment['width_max'], 8.0, places=6)
+
+    def test_the_median_is_the_default_aggregation(self):
+        pinch = (AXIS_STATION_OFFSET + 2.0, AXIS_STATION_OFFSET + 3.0, 2.0, 2.0)
+        segments = self._analyze(dem_kwargs={'pinch': pinch},
+                                 params={'cross_section_spacing': 1.0})['segments']
+
+        self.assertAlmostEqual(segments[0]['width'], 8.0, places=6)
+
+    def test_the_mean_keeps_width_equal_to_both_sides(self):
+        """Aunque la media no corresponda a ninguna transversal real, el tramo sigue siendo
+        internamente coherente: la regla que se dibuja mide lo que dice el popup."""
+        pinch = (AXIS_STATION_OFFSET + 2.0, AXIS_STATION_OFFSET + 3.0, 1.0, 3.0)
+        segments = self._analyze(dem_kwargs={'pinch': pinch},
+                                 params={'cross_section_spacing': 1.0,
+                                         'width_aggregation': 'mean'})['segments']
+
+        for segment in segments:
+            if segment['width'] is None:
+                continue
+            self.assertAlmostEqual(segment['width'],
+                                   segment['offset_left'] + segment['offset_right'], places=9)
+            self.assertIsNotNone(segment['edge_left'])
+            self.assertIsNotNone(segment['edge_right'])
+
+    def test_the_reported_section_is_a_real_one(self):
+        """Lo que compra elegir la sección mediana en vez de promediar: todo lo que se reporta
+        —ancho, lados, bombeo y puntos de borde— sale de una misma transversal medida."""
+        pinch = (AXIS_STATION_OFFSET + 2.0, AXIS_STATION_OFFSET + 3.0, 1.0, 3.0)
+        segments = self._analyze(dem_kwargs={'pinch': pinch},
+                                 params={'cross_section_spacing': 1.0})['segments']
+
+        for segment in segments:
+            if segment['width'] is None:
+                continue
+            self.assertAlmostEqual(segment['width'],
+                                   segment['offset_left'] + segment['offset_right'], places=9)
+            self.assertIsNotNone(segment['edge_left'])
+            self.assertIsNotNone(segment['edge_right'])
+
+    def test_the_segment_carries_both_its_centre_and_where_it_was_measured(self):
+        """`midpoint` es el centro del tramo —donde el cliente dibuja la regla, para que queden
+        regularmente espaciadas— y `section_midpoint` dónde se midió de verdad. Con una sola
+        transversal coinciden; con varias, no tienen por qué."""
+        pinch = (AXIS_STATION_OFFSET + 2.0, AXIS_STATION_OFFSET + 3.0, 2.0, 2.0)
+
+        alone = self._analyze()['segments'][0]
+        self.assertEqual(alone['midpoint'], alone['section_midpoint'])
+
+        many = self._analyze(dem_kwargs={'pinch': pinch},
+                             params={'cross_section_spacing': 1.0})['segments']
+        # El centro del tramo no depende de dónde cayera la mediana: es el mismo con y sin
+        # espaciado, y sigue repartiendo el tramo por la mitad.
+        for segment, reference in zip(many, self._analyze()['segments']):
+            self.assertEqual(segment['midpoint'], reference['midpoint'])
+        self.assertNotEqual(many[0]['midpoint'], many[0]['section_midpoint'],
+                            'la sección mediana del tramo del bache no es la central')
+
+    def test_measuring_often_rescues_segments_whose_midpoint_has_no_edge(self):
+        """La otra ganancia: hoy, si la única transversal falla, el tramo entero se queda sin
+        ancho. Con varias basta que una mida."""
+        # Sin talud en la franja del punto medio del primer tramo: ahí no hay borde que detectar.
+        pinch = (AXIS_STATION_OFFSET + 2.0, AXIS_STATION_OFFSET + 3.0, 40.0, 40.0)
+
+        alone = self._analyze(dem_kwargs={'pinch': pinch})['segments'][0]
+        often = self._analyze(dem_kwargs={'pinch': pinch},
+                              params={'cross_section_spacing': 1.0})['segments'][0]
+
+        self.assertIsNone(alone['width'], 'la única transversal cae donde no hay borde')
+        self.assertAlmostEqual(often['width'], 8.0, places=6)
+        self.assertEqual(often['width_sections'], 5)
+        self.assertEqual(often['width_measured_sections'], 4, 'la del hueco no mide, las otras sí')
+
+    def test_smoothing_rescues_a_noisy_road_and_off_changes_nothing(self):
+        # Ruido sigma=5 cm a paso 0,25 m: la pendiente aparente entre vecinas ronda el 28 % y el
+        # umbral por defecto encuentra rachas falsas mucho antes del talud — el síntoma real del
+        # camino minero: anchos pocos, pequeños e irregulares. El suavizado de mediana con ventana
+        # de 1,25 m (5 muestras) las elimina sin mover el talud. Determinista: el ruido va con
+        # semilla fija.
+        noisy = {'noise': 0.05, 'cross_slope': 0.0}
+
+        raw = self._analyze(dem_kwargs=noisy)['summary']
+        smoothed = self._analyze(dem_kwargs=noisy,
+                                 params={'smooth_window': 1.25})['summary']
+
+        self.assertLess(raw['mean_width'] or 0.0, 6.0)
+        self.assertAlmostEqual(smoothed['mean_width'], 8.0, delta=1.0)
+
+        # Y apagado (el defecto) es EXACTAMENTE el comportamiento anterior: mismo resultado
+        # que un análisis sin el parámetro, tramo a tramo.
+        clean = {'cross_slope': 0.0}
+        without = self._analyze(dem_kwargs=clean)['segments']
+        with_zero = self._analyze(dem_kwargs=clean, params={'smooth_window': 0.0})['segments']
+        for a, b in zip(without, with_zero):
+            self.assertEqual(a['width'], b['width'])
+            self.assertEqual(a['status'], b['status'])
 
     def test_longitudinal_grade_is_exact(self):
         segments = self._analyze()['segments']

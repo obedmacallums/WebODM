@@ -132,6 +132,45 @@ class CrossSectionTest(SimpleTestCase):
             geometry.cross_section_offsets(10.0, 0.0)
 
 
+class SectionStationsTest(SimpleTestCase):
+    """Dónde se sitúan las transversales de un tramo (una o varias)."""
+
+    def test_without_spacing_there_is_exactly_one_at_the_midpoint(self):
+        # El comportamiento de siempre, y el defecto: una medida por tramo, en su punto medio.
+        self.assertEqual(geometry.section_stations(10.0, 15.0, 0.0), [12.5])
+
+    def test_sections_are_evenly_spread_and_centred_in_the_segment(self):
+        # Centradas, no desde el borde: así ninguna cae en la junta entre tramos, donde el ancho
+        # pertenecería por igual a los dos.
+        self.assertEqual(geometry.section_stations(0.0, 5.0, 1.0),
+                         [0.5, 1.5, 2.5, 3.5, 4.5])
+
+    def test_a_spacing_wider_than_the_segment_still_measures_once(self):
+        # Nunca cero: un tramo sin ninguna transversal no tendría ancho por un detalle de
+        # aritmética, no porque el camino no se pueda medir ahí.
+        self.assertEqual(geometry.section_stations(0.0, 5.0, 50.0), [2.5])
+
+    def test_every_station_falls_strictly_inside_the_segment(self):
+        for spacing in (0.0, 0.3, 1.0, 2.0, 7.0):
+            with self.subTest(spacing=spacing):
+                stations = geometry.section_stations(20.0, 25.0, spacing)
+                self.assertTrue(stations)
+                self.assertTrue(all(20.0 < s < 25.0 for s in stations), stations)
+
+    def test_the_spread_is_symmetric_about_the_midpoint(self):
+        # Sin sesgo hacia el principio ni el final del tramo: la media de las progresivas es su
+        # punto medio, sea cual sea el número de secciones.
+        for spacing in (0.4, 1.0, 1.7, 2.5):
+            with self.subTest(spacing=spacing):
+                stations = geometry.section_stations(0.0, 5.0, spacing)
+                self.assertAlmostEqual(sum(stations) / len(stations), 2.5, places=9)
+
+    def test_the_count_follows_the_requested_spacing(self):
+        self.assertEqual(len(geometry.section_stations(0.0, 5.0, 1.0)), 5)
+        self.assertEqual(len(geometry.section_stations(0.0, 5.0, 0.5)), 10)
+        self.assertEqual(len(geometry.section_stations(0.0, 20.0, 1.0)), 20)
+
+
 class ProjectionTest(SimpleTestCase):
     def test_round_trip_through_wgs84_is_stable(self):
         vertices = axis_vertices(vertices=3)

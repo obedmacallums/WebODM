@@ -4,7 +4,8 @@ import './RoadPanel.scss';
 import ErrorMessage from 'webodm/components/ErrorMessage';
 import { _ } from 'webodm/classes/gettext';
 import bridge from './roadBridge';
-import { initialParams, publishAction, axisSelection } from './panelLogic';
+import { initialParams, publishAction, axisSelection, applyPreset, MINING_PRESET }
+  from './panelLogic';
 import { colors } from './segmentStyle';
 
 const POLL_INTERVAL = 1500;
@@ -19,6 +20,8 @@ const PARAM_FIELDS = [
   ['segment_length', () => _("Longitud de tramo (m)"), null],
   ['search_half_width', () => _("Semiancho de búsqueda (m)"), null],
   ['sample_step', () => _("Paso de muestreo (m)"), null],
+  ['cross_section_spacing', () => _("Medir el ancho cada (m, 0 = una vez por tramo)"), null],
+  ['smooth_window', () => _("Suavizado del perfil (m, 0 = sin suavizar)"), null],
   ['break_threshold', () => _("Umbral de quiebre (%)"), 'break'],
   ['surface_tolerance', () => _("Tolerancia de separación (m)"), 'surface'],
   ['min_consecutive_samples', () => _("Muestras seguidas para confirmar el borde"), null],
@@ -28,6 +31,13 @@ const PARAM_FIELDS = [
 const EDGE_MODE_LABELS = {
   break: () => _("Quiebre de pendiente — talud o cuneta (camino)"),
   surface: () => _("Separación de la calzada — bordillo (calle)")
+};
+
+// Cómo se resume el ancho cuando el tramo se mide en varias transversales. Solo tiene efecto con
+// `cross_section_spacing` > 0; con una sola medida los dos criterios devuelven lo mismo.
+const WIDTH_AGGREGATION_LABELS = {
+  median: () => _("Mediana — sección real, ignora el bache suelto"),
+  mean: () => _("Media — promedia todas, el bache arrastra")
 };
 
 export default class RoadPanel extends React.Component {
@@ -61,6 +71,7 @@ export default class RoadPanel extends React.Component {
 
     this._poll = null;
     this._thresholdSaves = {}; // analysisId -> timeout del PATCH diferido
+    this._widthThresholdSaves = {};   // lo mismo para el semáforo del ancho
     this._published = {};      // analysisId -> L.FeatureGroup, o `true` si el GET está en vuelo
     this._paramsSeeded = false;   // el formulario solo se siembra una vez: después manda el usuario
     this._analysesLoaded = false; // la siembra necesita capabilities Y la primera lista de análisis
@@ -100,6 +111,7 @@ export default class RoadPanel extends React.Component {
     bridge.setAnnotationAddedNotifier(null);
     this.stopPolling();
     Object.values(this._thresholdSaves).forEach(clearTimeout);
+    Object.values(this._widthThresholdSaves).forEach(clearTimeout);
     clearTimeout(this._axisRefresh);
   }
 
@@ -322,23 +334,44 @@ export default class RoadPanel extends React.Component {
     // El backend rechaza aviso >= alerta; se evita mandar un estado que ya se sabe inválido.
     if (thresholds[0] >= thresholds[1]) return;
 
+    // Los umbrales son de la tarea, no de un camino: se aplican a todos los análisis a la vez.
     this.setState({
-      analyses: this.state.analyses.map(
-        a => a.id === analysis.id ? Object.assign({}, a, {color_thresholds: thresholds}) : a)
+      analyses: this.state.analyses.map(a => Object.assign({}, a, {color_thresholds: thresholds}))
     });
-    bridge.applyThresholds(analysis.id, thresholds);
+    this.state.analyses.forEach(a => bridge.applyThresholds(a.id, thresholds));
 
     clearTimeout(this._thresholdSaves[analysis.id]);
     this._thresholdSaves[analysis.id] = setTimeout(
-      () => this.saveThresholds(analysis.id, thresholds), THRESHOLD_SAVE_DELAY);
+      () => this.saveThresholds(analysis.id, {color_thresholds: thresholds}),
+      THRESHOLD_SAVE_DELAY);
   }
 
-  saveThresholds(analysisId, thresholds){
+  // El semáforo del ancho es el gemelo del de pendiente, con el criterio invertido: aquí lo malo
+  // es quedarse corto. Se recolorean las reglas transversales, no los ejes.
+  handleWidthThresholdChange = (analysis, index, value) => {
+    const thresholds = (analysis.width_thresholds || []).slice();
+    thresholds[index] = parseFloat(value);
+    if (isNaN(thresholds[0]) || isNaN(thresholds[1])) return;
+    // El backend rechaza mínimo >= holgado; se evita mandar un estado que ya se sabe inválido.
+    if (thresholds[0] >= thresholds[1]) return;
+
+    this.setState({
+      analyses: this.state.analyses.map(a => Object.assign({}, a, {width_thresholds: thresholds}))
+    });
+    this.state.analyses.forEach(a => bridge.applyWidthThresholds(a.id, thresholds));
+
+    clearTimeout(this._widthThresholdSaves[analysis.id]);
+    this._widthThresholdSaves[analysis.id] = setTimeout(
+      () => this.saveThresholds(analysis.id, {width_thresholds: thresholds}),
+      THRESHOLD_SAVE_DELAY);
+  }
+
+  saveThresholds(analysisId, payload){
     $.ajax({
       url: `${this.apiBase()}/analyses/${analysisId}`,
       type: 'PATCH',
       contentType: 'application/json',
-      data: JSON.stringify({color_thresholds: thresholds})
+      data: JSON.stringify(payload)
     }).fail(req => this.setState({
       error: this.errorFrom(req, _("No se pudieron guardar los umbrales de color."))
     }));
@@ -458,6 +491,23 @@ export default class RoadPanel extends React.Component {
                 </option>)}
             </select>
           </div>
+          {/* Solo sirve de algo midiendo varias veces, así que se muestra cuando lo hace: con una
+              transversal por tramo la media y la mediana son el mismo número. */}
+          {parseFloat(params.cross_section_spacing) > 0 ?
+            <div className="form-group">
+              <label>{_("Resumen del ancho del tramo")}</label>
+              <select className="form-control"
+                      value={params.width_aggregation || 'median'}
+                      onChange={e => this.setState({
+                        params: Object.assign({}, params, {width_aggregation: e.target.value})
+                      })}>
+                {(capabilities.width_aggregations || ['median']).map(mode =>
+                  <option key={mode} value={mode}>
+                    {WIDTH_AGGREGATION_LABELS[mode] ? WIDTH_AGGREGATION_LABELS[mode]() : mode}
+                  </option>)}
+              </select>
+            </div> : null}
+
           {PARAM_FIELDS.map(([key, label, onlyMode]) => {
             if (onlyMode && onlyMode !== (params.edge_mode || 'break')) return null;
             const [low, high] = ranges[key] || [];
@@ -474,9 +524,16 @@ export default class RoadPanel extends React.Component {
               <span className="road-range">{_("entre")} {low} {_("y")} {high}</span>
             </div>);
           })}
-          <a onClick={() => this.setState({params: Object.assign({}, capabilities.defaults)})}>
-            {_("Volver a los valores por defecto")}
-          </a>
+          <div className="road-param-actions">
+            {/* Rellena solo lo que el criterio minero necesita (semiancho, paso, umbral,
+                coherencia); la longitud de tramo y los parámetros del otro modo se respetan. */}
+            <a onClick={() => this.setState({params: applyPreset(params, MINING_PRESET)})}>
+              {_("Preset: camino minero")}
+            </a>
+            <a onClick={() => this.setState({params: Object.assign({}, capabilities.defaults)})}>
+              {_("Volver a los valores por defecto")}
+            </a>
+          </div>
         </div>
         : null}
     </div>);
@@ -507,10 +564,27 @@ export default class RoadPanel extends React.Component {
     </div>);
   }
 
+  // Un único juego de deslizadores para toda la tarea: los umbrales son una preferencia de lectura
+  // del usuario, no una propiedad de un camino, así que gobiernan todos los análisis a la vez.
+  // Repetirlos dentro de cada uno obligaba a repetir el ajuste tantas veces como caminos hubiera.
+  //
+  // El análisis que se pasa a los manejadores solo aporta la URL del PATCH: el servidor los guarda
+  // en la tarea, venga la petición desde el que venga.
+  renderSharedThresholds(){
+    const completed = this.state.analyses.filter(a => a.status === 'completed');
+    if (!completed.length) return null;
+
+    return (<div className="road-shared-thresholds">
+      {this.renderThresholds(completed[0])}
+      {this.renderWidthThresholds(completed[0])}
+    </div>);
+  }
+
   renderThresholds(analysis){
     const [warn, alert] = analysis.color_thresholds || [8.0, 12.0];
 
     return (<div className="road-thresholds">
+      <div className="road-threshold-title">{_("Pendiente del eje")}</div>
       <label>
         {_("Aviso")}
         <input type="range" min="1" max="49" step="0.5" value={warn}
@@ -522,6 +596,38 @@ export default class RoadPanel extends React.Component {
         <input type="range" min="2" max="50" step="0.5" value={alert}
                onChange={e => this.handleThresholdChange(analysis, 1, e.target.value)} />
         <span>{alert}%</span>
+      </label>
+    </div>);
+  }
+
+  // El semáforo del ancho colorea las reglas transversales. Va aparte del de pendiente y con su
+  // propio rótulo porque los dos comparten paleta pero no criterio: aquí el rojo es "se estrecha".
+  //
+  // El recorrido de los deslizadores sale de los propios umbrales (0 … 2x el holgado) en vez de
+  // ser una constante: en un recorrido 0-100 m ajustar una calle de 6 m sería cuestión de puntería,
+  // y en uno 0-10 m una rampa minera no cabría. Como el holgado nace siendo el ancho medio de la
+  // tarea, el recorrido arranca centrado en la escala real del camino y luego crece con él.
+  renderWidthThresholds(analysis){
+    const thresholds = analysis.width_thresholds;
+    if (!thresholds) return null;
+
+    const [low, high] = thresholds;
+    const max = Math.max(Math.ceil(2 * high), 1);
+    const step = max > 20 ? 0.5 : 0.1;
+
+    return (<div className="road-thresholds">
+      <div className="road-threshold-title">{_("Ancho del camino")}</div>
+      <label>
+        {_("Mínimo")}
+        <input type="range" min="0" max={max} step={step} value={low}
+               onChange={e => this.handleWidthThresholdChange(analysis, 0, e.target.value)} />
+        <span>{low} m</span>
+      </label>
+      <label>
+        {_("Holgado")}
+        <input type="range" min="0" max={max} step={step} value={high}
+               onChange={e => this.handleWidthThresholdChange(analysis, 1, e.target.value)} />
+        <span>{high} m</span>
       </label>
     </div>);
   }
@@ -563,7 +669,6 @@ export default class RoadPanel extends React.Component {
               {_("pendiente")} {(summary.min_grade || 0).toFixed(1)}% … {(summary.max_grade || 0).toFixed(1)}%
             </span>
           </div>
-          {this.renderThresholds(analysis)}
           <div className="road-downloads">
             {_("Descargar:")}
             <a onClick={() => this.handleDownload(analysis, 'csv')}>CSV</a>
@@ -595,6 +700,9 @@ export default class RoadPanel extends React.Component {
     return (<div className="road-legend">
       {entries.map(([color, label]) =>
         <span key={label}><i style={{background: color}} />{label}</span>)}
+      <span className="road-legend-note">
+        {_("Los colores del eje son la pendiente; los de la regla transversal, el ancho — misma paleta, criterios distintos, y en el ancho el rojo es quedarse corto.")}
+      </span>
       <span className="road-legend-note">
         {_("El trazo discontinuo marca los tramos sin ancho medido.")}
       </span>
@@ -641,6 +749,7 @@ export default class RoadPanel extends React.Component {
             <ul className="road-analyses">{analyses.map(a => this.renderAnalysis(a))}</ul>
             : <div className="road-notice">{_("Todavía no hay análisis en esta tarea.")}</div>}
 
+          {this.renderSharedThresholds()}
           {analyses.some(a => a.status === 'completed') ? this.renderLegend() : null}
         </div>}
     </div>);

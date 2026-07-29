@@ -68,13 +68,14 @@ class CsvTest(RoadTestBase):
         return text, list(csv.reader(io.StringIO('\n'.join(body))))
 
     def test_header_matches_the_contract(self):
-        # Las dos columnas de origen van AL FINAL (`006` FR-033): quien lea por posición de
-        # columna no se rompe con la ampliación.
+        # Cada ampliación se añade AL FINAL (`006` FR-033): quien lea por posición de columna no
+        # se rompe. Primero las dos de origen, después las cuatro de dispersión del ancho.
         _text, rows = self._rows([segment(0)])
         self.assertEqual(rows[0], [
             'index', 'station_start', 'station_end', 'length', 'elevation', 'grade_pct',
             'grade_deg', 'width', 'offset_left', 'offset_right', 'cross_slope_pct', 'status',
-            'left_reason', 'right_reason', 'left_edge_source', 'right_edge_source'])
+            'left_reason', 'right_reason', 'left_edge_source', 'right_edge_source',
+            'width_min', 'width_max', 'width_sections', 'width_measured_sections'])
 
     def test_one_row_per_segment(self):
         _text, rows = self._rows([segment(0), UNMEASURED, NO_COVERAGE])
@@ -272,8 +273,9 @@ class ExportEndpointTest(AnalysesApiTestBase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertIn('attachment', res['Content-Disposition'])
         self.assertIn('-road.csv', res['Content-Disposition'])
-        # 14 columnas de `005` + las dos de origen que `006` añade al final (FR-033).
-        self.assertEqual(len(res.content.decode().splitlines()[0].split(',')), 16)
+        # 14 columnas de `005`, las dos de origen que `006` añade al final (FR-033) y las cuatro
+        # de dispersión del ancho.
+        self.assertEqual(len(res.content.decode().splitlines()[0].split(',')), 20)
 
     def test_geojson_download_parses(self):
         task = self._task_with_dem()

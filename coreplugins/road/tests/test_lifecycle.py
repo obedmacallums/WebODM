@@ -7,11 +7,16 @@ mismos y el `updated_at` del cálculo no se mueve. Si esa frontera se borrara, c
 deslizador dispararía un recálculo de minutos.
 """
 
+from unittest import mock
+
 from rest_framework import status
 
-from .. import store
+from .. import axis, sources, store
 from .base import axis_vertices
 from .test_api_analyses import AXIS_REF, AnalysesApiTestBase
+from .test_axis import FakeAnnotations, polyline
+
+SECOND_REF = 'c3d4'
 
 
 class PreFeatureDocumentTest(AnalysesApiTestBase):
@@ -75,6 +80,23 @@ class PatchTest(AnalysesApiTestBase):
     def _analysis(self, task):
         return self._create(task).data['analysis_id']
 
+    def _create_second(self, task):
+        """Un segundo camino en la misma tarea: otro eje, otro análisis."""
+        two = FakeAnnotations([
+            polyline(AXIS_REF, 'Camino norte', vertices=axis_vertices()),
+            polyline(SECOND_REF, 'Camino sur',
+                     vertices=axis_vertices(row_start=60, row_end=400)),
+        ])
+        with mock.patch.object(axis, 'get_plugin_by_name', return_value=two):
+            return self.client.post(
+                self._url(task, 'analyses'),
+                {'axis': {'kind': 'annotation', 'ref': SECOND_REF}},
+                format='json').data['analysis_id']
+
+    def _two_analyses(self, task):
+        """Dos caminos distintos de la misma tarea, sobre dos tramos del eje sintético."""
+        return self._analysis(task), self._create_second(task)
+
     def test_changing_thresholds_touches_neither_segments_nor_updated_at(self):
         task = self._task_with_dem()
         self._login()
@@ -88,7 +110,8 @@ class PatchTest(AnalysesApiTestBase):
 
         after = store.get_analysis(str(task.id), analysis_id)
         self.assertEqual(res.status_code, status.HTTP_200_OK)
-        self.assertEqual(after['color_thresholds'], [6.0, 10.0])
+        self.assertEqual(store.get_thresholds(store.get_document(str(task.id)))['color'],
+                         [6.0, 10.0])
         self.assertEqual(after['updated_at'], before['updated_at'])
         self.assertEqual(after['summary'], before['summary'])
         self.assertEqual(store.read_segments(str(task.id), analysis_id), segments_before)
@@ -102,6 +125,87 @@ class PatchTest(AnalysesApiTestBase):
 
         listed = self.client.get(self._url(task, 'analyses')).data['analyses'][0]
         self.assertEqual(listed['color_thresholds'], [6.0, 10.0])
+
+    def test_width_thresholds_arrive_derived_and_can_be_overridden(self):
+        """Sin fijar, los umbrales de ancho llegan deducidos del ancho medio del propio análisis;
+        en cuanto el usuario los mueve, mandan los suyos y dejan de deducirse."""
+        task = self._task_with_dem()
+        self._login()
+        analysis_id = self._analysis(task)
+
+        listed = self.client.get(self._url(task, 'analyses')).data['analyses'][0]
+        mean = listed['summary']['mean_width']
+        self.assertEqual(listed['width_thresholds'], sources.derive_width_thresholds(mean))
+        # En el almacén no se sella nada: así un recálculo con otro ancho vuelve a deducirlos.
+        self.assertIsNone(store.get_analysis(str(task.id), analysis_id).get('width_thresholds'))
+
+        res = self.client.patch(self._url(task, 'analyses/{}'.format(analysis_id)),
+                                {'width_thresholds': [3.0, 4.5]}, format='json')
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['width_thresholds'], [3.0, 4.5])
+        listed = self.client.get(self._url(task, 'analyses')).data['analyses'][0]
+        self.assertEqual(listed['width_thresholds'], [3.0, 4.5])
+
+    def test_colour_thresholds_are_shared_by_every_analysis_of_the_task(self):
+        """El semáforo es una preferencia de lectura del usuario, no una propiedad de un camino:
+        moverlo en un análisis lo mueve en todos los de la tarea."""
+        task = self._task_with_dem()
+        self._login()
+        first, second = self._two_analyses(task)
+
+        res = self.client.patch(self._url(task, 'analyses/{}'.format(first)),
+                                {'color_thresholds': [4.0, 9.0]}, format='json')
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        listed = self.client.get(self._url(task, 'analyses')).data['analyses']
+        self.assertEqual(len(listed), 2)
+        for analysis in listed:
+            self.assertEqual(analysis['color_thresholds'], [4.0, 9.0])
+        # Y también al pedir el otro por separado, no solo en el índice.
+        detail = self.client.get(self._url(task, 'analyses/{}'.format(second))).data
+        self.assertEqual(detail['color_thresholds'], [4.0, 9.0])
+
+    def test_width_thresholds_are_shared_and_derived_from_the_whole_task(self):
+        task = self._task_with_dem()
+        self._login()
+        first, second = self._two_analyses(task)
+
+        listed = self.client.get(self._url(task, 'analyses')).data['analyses']
+        derived = [a['width_thresholds'] for a in listed]
+        self.assertEqual(derived[0], derived[1], 'un solo par para toda la tarea')
+        self.assertIsNotNone(derived[0])
+
+        self.client.patch(self._url(task, 'analyses/{}'.format(second)),
+                          {'width_thresholds': [3.0, 4.5]}, format='json')
+
+        listed = self.client.get(self._url(task, 'analyses')).data['analyses']
+        for analysis in listed:
+            self.assertEqual(analysis['width_thresholds'], [3.0, 4.5])
+
+    def test_a_new_analysis_inherits_the_thresholds_already_in_use(self):
+        # Calcular un camino más no puede devolver el semáforo a los valores de fábrica.
+        task = self._task_with_dem()
+        self._login()
+        first = self._analysis(task)
+        self.client.patch(self._url(task, 'analyses/{}'.format(first)),
+                          {'color_thresholds': [4.0, 9.0]}, format='json')
+
+        second = self._create_second(task)
+
+        detail = self.client.get(self._url(task, 'analyses/{}'.format(second))).data
+        self.assertEqual(detail['color_thresholds'], [4.0, 9.0])
+
+    def test_invalid_width_thresholds_are_rejected(self):
+        task = self._task_with_dem()
+        self._login()
+        analysis_id = self._analysis(task)
+
+        res = self.client.patch(self._url(task, 'analyses/{}'.format(analysis_id)),
+                                {'width_thresholds': [8.0, 5.0]}, format='json')
+
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data['code'], 'invalid_parameter')
 
     def test_renaming_is_allowed(self):
         task = self._task_with_dem()

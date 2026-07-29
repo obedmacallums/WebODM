@@ -57,10 +57,39 @@ def _abort_celery_task(celery_task_id):
         res.backend.store_result(celery_task_id, result=None, state="ABORTED", traceback=None)
 
 
-def _analysis_response(task, analysis):
-    """Entrada del índice más el estado derivado `stale` (`data-model.md` §2)."""
+def _mean_width_of_task(document):
+    """Ancho medio de los análisis completados de la tarea, o `None`.
+
+    Es de lo que se deducen los umbrales de ancho mientras el usuario no los fije. Se calcula
+    sobre **toda** la tarea porque los umbrales son de la tarea: derivarlos de un solo camino
+    dejaría a los demás juzgados por una escala que no es la suya.
+    """
+    means = [(a.get('summary') or {}).get('mean_width')
+             for a in document.get('analyses') or []]
+    means = [m for m in means if m]
+    return sum(means) / len(means) if means else None
+
+
+def _resolved_thresholds(document):
+    """Los dos pares que gobiernan el color en toda la tarea, ya resueltos."""
+    stored = store.get_thresholds(document)
+    return {
+        'color': stored['color'] or list(sources.COLOR_THRESHOLDS_DEFAULT),
+        'width': stored['width'] or sources.derive_width_thresholds(
+            _mean_width_of_task(document)),
+    }
+
+
+def _analysis_response(task, analysis, thresholds):
+    """Entrada del índice más el estado derivado `stale` y los umbrales de color.
+
+    Los umbrales llegan resueltos de fuera —son de la tarea, no del análisis— para no releer el
+    documento una vez por cada entrada del índice.
+    """
     payload = dict(analysis)
     payload['stale'] = sources.is_stale(task, analysis)
+    payload['color_thresholds'] = thresholds['color']
+    payload['width_thresholds'] = thresholds['width']
     return payload
 
 
@@ -204,6 +233,7 @@ class Capabilities(TaskView):
             # Aparte de `ranges` porque es un enum, no un intervalo: el panel dibuja un selector,
             # no un deslizador (`006` contracts/rest-api-delta.md).
             'edge_modes': list(sources.EDGE_MODES),
+            'width_aggregations': list(sources.WIDTH_AGGREGATIONS),
             'max_vertices': geometry.MAX_VERTICES,
             'max_upload_bytes': sources.MAX_UPLOAD_BYTES,
         }, status=status.HTTP_200_OK)
@@ -214,9 +244,12 @@ class AnalysisList(TaskView):
 
     def get(self, request, pk=None):
         task = self.get_and_check_task(request, pk)
+        document = store.get_document(str(task.id))
+        thresholds = _resolved_thresholds(document)
         return Response({
             'running': store.get_running(str(task.id)),
-            'analyses': [_analysis_response(task, a) for a in store.list_analyses(str(task.id))],
+            'analyses': [_analysis_response(task, a, thresholds)
+                         for a in document['analyses']],
         }, status=status.HTTP_200_OK)
 
     def post(self, request, pk=None):
@@ -277,11 +310,9 @@ class AnalysisList(TaskView):
                 'model': model,
                 'variant': variant,
                 'params': params,
-                # Los umbrales del semáforo sobreviven al recálculo: son una preferencia de lectura
-                # del usuario, no un producto del cálculo, y devolverlos a los de fábrica cada vez
-                # que se afina un parámetro sería un paso atrás en cada iteración.
-                'color_thresholds': ((existing or {}).get('color_thresholds')
-                                     or list(sources.COLOR_THRESHOLDS_DEFAULT)),
+                # Los umbrales del semáforo NO viajan en el análisis: viven en la tarea y valen
+                # para todos sus caminos (`store.get_thresholds`). Así un análisis nuevo hereda
+                # el criterio que el usuario ya tenía puesto, en vez de estrenar los de fábrica.
                 'status': 'running',
                 'progress': 0.0,
                 'error': None,
@@ -352,10 +383,10 @@ class AnalysisEstimate(TaskView):
 class AnalysisDetail(TaskView):
     """`GET`/`PATCH`/`DELETE task/<pk>/analyses/<analysis_id>`."""
 
-    PATCHABLE = ('name', 'color_thresholds')
+    PATCHABLE = ('name', 'color_thresholds', 'width_thresholds')
 
     def patch(self, request, pk=None, analysis_id=None):
-        """Solo `name` y `color_thresholds`.
+        """Solo `name` y los dos pares de umbrales.
 
         Cualquier otro campo se rechaza en vez de ignorarse: aceptar un `params` por aquí dejaría
         un análisis cuyos parámetros ya no describen sus propios tramos, y nadie se enteraría.
@@ -385,18 +416,28 @@ class AnalysisDetail(TaskView):
                 return error(_('El nombre no puede estar vacío.'), ERR_INVALID_PARAMETER)
             changes['name'] = name[:255]
 
-        if 'color_thresholds' in request.data:
-            thresholds, err = sources.validate_color_thresholds(request.data['color_thresholds'])
+        # Los dos pares de umbrales se guardan en la **tarea**, no en este análisis: son una
+        # preferencia de lectura del usuario y valen para todos sus caminos a la vez. La ruta
+        # sigue siendo la del análisis porque es desde su ficha desde donde se mueven.
+        shared = {}
+        for field, key, validate in (
+                ('color_thresholds', 'color', sources.validate_color_thresholds),
+                ('width_thresholds', 'width', sources.validate_width_thresholds)):
+            if field not in request.data:
+                continue
+            value, err = validate(request.data[field])
             if err:
                 return error(err, ERR_INVALID_PARAMETER)
-            changes['color_thresholds'] = thresholds
+            shared[key] = value
 
-        def mutate(a):
-            a.update(changes)
-            return a
+        if shared:
+            store.set_thresholds(str(task.id), shared)
 
-        updated = store.update_analysis(str(task.id), analysis_id, mutate)
-        return Response(_analysis_response(task, updated), status=status.HTTP_200_OK)
+        updated = (store.update_analysis(str(task.id), analysis_id, lambda a: a.update(changes) or a)
+                   if changes else store.get_analysis(str(task.id), analysis_id))
+        thresholds = _resolved_thresholds(store.get_document(str(task.id)))
+        return Response(_analysis_response(task, updated, thresholds),
+                        status=status.HTTP_200_OK)
 
     def delete(self, request, pk=None, analysis_id=None):
         task = self.get_and_check_task(request, pk)
@@ -424,7 +465,8 @@ class AnalysisDetail(TaskView):
             return error(_('El análisis no existe en esta tarea.'), ERR_NOT_FOUND,
                          status.HTTP_404_NOT_FOUND)
 
-        payload = _analysis_response(task, analysis)
+        payload = _analysis_response(task, analysis,
+                                     _resolved_thresholds(store.get_document(str(task.id))))
         payload['segments'] = []
 
         if analysis.get('status') == 'completed':
@@ -511,7 +553,9 @@ class AnalysisCancel(TaskView):
             cancel_analysis(task, analysis)
             analysis = store.get_analysis(str(task.id), analysis_id)
 
-        return Response(_analysis_response(task, analysis), status=status.HTTP_200_OK)
+        thresholds = _resolved_thresholds(store.get_document(str(task.id)))
+        return Response(_analysis_response(task, analysis, thresholds),
+                        status=status.HTTP_200_OK)
 
 
 def cancel_analysis(task, analysis):

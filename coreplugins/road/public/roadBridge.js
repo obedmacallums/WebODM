@@ -2,6 +2,7 @@ import L from 'leaflet';
 import PluginsAPI from 'webodm/classes/plugins/API';
 import { _ } from 'webodm/classes/gettext';
 import { styleForSegment, reasonLabel, haloStyleFor, hitStyle, widthTickStyle } from './segmentStyle';
+import { widthTickPoints } from './widthTick';
 
 // Diálogo con el bus de anotaciones del core (`contracts/consumed-contracts.md` §3).
 //
@@ -79,6 +80,15 @@ function popupHtml(segment){
     return `<tr><th>${label}</th><td>${cell}</td></tr>`;
   }).join('');
 
+  // Con el ancho medido varias veces en el tramo, la cifra principal es la de la sección mediana
+  // y el rango dice si el tramo es uniforme o se estrecha. Con una sola medición no hay rango que
+  // enseñar, y decir "8,00 m (8,00–8,00, 1 de 1)" sería ruido.
+  let spread = '';
+  if (segment.width_sections > 1 && segment.width_measured_sections > 0){
+    spread = ` <em>(${fmt(segment.width_min, 2)}–${fmt(segment.width_max, 2)} m` +
+             `, ${segment.width_measured_sections}/${segment.width_sections})</em>`;
+  }
+
   return `<div class="road-segment-popup">
     <h4>${_('Tramo')} ${segment.index + 1}</h4>
     <table>
@@ -86,7 +96,7 @@ function popupHtml(segment){
       <tr><th>${_('Longitud')}</th><td>${fmt(segment.length, 2, ' m')}</td></tr>
       <tr><th>${_('Cota')}</th><td>${fmt(segment.elevation, 2, ' m')}</td></tr>
       <tr><th>${_('Pendiente')}</th><td>${fmt(segment.grade, 2, ' %')} (${fmt(segment.grade_deg, 2, '°')})</td></tr>
-      <tr><th>${_('Ancho')}</th><td>${fmt(segment.width, 2, ' m')}</td></tr>
+      <tr><th>${_('Ancho')}</th><td>${fmt(segment.width, 2, ' m')}${spread}</td></tr>
       ${sides}
       <tr><th>${_('Pendiente transversal')}</th><td>${fmt(segment.cross_slope, 2, ' %')}</td></tr>
     </table>
@@ -98,17 +108,18 @@ function popupHtml(segment){
 // van por ella—, así que es también la que lleva el `_roadSegment` con el que el resto del bridge
 // reconoce lo suyo; la visible se dibuja ya sin interacción y se alcanza desde `_roadLine`.
 //
-// Y una tercera cuando el tramo tiene ancho: la **regla del ancho**, la transversal de borde a
-// borde (`edge_left` → `edge_right`, que ya viajan en el tramo). Va primero en la lista para
+// Y una tercera cuando el tramo tiene ancho: la **regla del ancho**, la transversal que dibuja la
+// medida centrada en el eje (`widthTick`, con el porqué del centrado). Va primero en la lista para
 // quedar bajo el eje coloreado, y sin interacción para no robarle el click al área de captura.
 // Donde falta un borde no hay regla: la ausencia es información, no un hueco a rellenar.
-function buildGroup(segments, thresholds){
+function buildGroup(segments, thresholds, widthThresholds){
   const layers = [];
   segments.forEach(segment => {
-    if (segment.edge_left && segment.edge_right){
-      const tick = L.polyline(toLatLngs([segment.edge_left, segment.edge_right]),
-                              widthTickStyle(segment));
+    const ends = widthTickPoints(segment);
+    if (ends){
+      const tick = L.polyline(toLatLngs(ends), widthTickStyle(segment, widthThresholds));
       tick._roadWidthTick = true;
+      tick._roadSegmentRef = segment;   // para recolorear sin volver a recorrer los tramos
       layers.push(tick);
     }
   });
@@ -218,10 +229,14 @@ function currentHalo(){
 
 function publishAnalysis(map, task, analysis, segments, opts = {}){
   const thresholds = analysis.color_thresholds || [8.0, 12.0];
-  const group = buildGroup(segments, thresholds);
+  // Sin umbrales de ancho la regla se dibuja en su verde neutro: el backend solo los deja vacíos
+  // cuando no hay ancho medio del que deducirlos, y entonces no hay nada que graduar.
+  const widthThresholds = analysis.width_thresholds || null;
+  const group = buildGroup(segments, thresholds, widthThresholds);
   group.addTo(map);
   attachHighlight(map, group);
-  registry.set(group, {taskId: task.id, analysisId: analysis.id, map, segments, thresholds});
+  registry.set(group, {taskId: task.id, analysisId: analysis.id, map, segments, thresholds,
+                       widthThresholds});
   PluginsAPI.Map.addAnnotation(group, analysis.name, task, !!opts.stored);
   return group;
 }
@@ -267,6 +282,22 @@ function applyThresholds(analysisId, thresholds){
     hoveredLayer = null;   // fuerza el refresco: si no, el guardia de `showHalo` lo daría por hecho
     showHalo(meta.map, layer);
   }
+  return true;
+}
+
+// El gemelo de `applyThresholds` para el otro semáforo: recolorea las reglas, y solo las reglas,
+// sin pedir nada al servidor. Los dos criterios son independientes a propósito —el eje juzga la
+// pendiente y la regla el ancho—, así que ninguno de los dos recoloreados toca lo del otro.
+function applyWidthThresholds(analysisId, thresholds){
+  const group = groupFor(analysisId);
+  if (!group) return false;
+  const meta = registry.get(group);
+  meta.widthThresholds = thresholds;
+  group.eachLayer(layer => {
+    if (layer._roadWidthTick){
+      layer.setStyle(widthTickStyle(layer._roadSegmentRef, thresholds));
+    }
+  });
   return true;
 }
 
@@ -351,6 +382,7 @@ export default {
   unpublishAnalysis,
   renameAnalysis,
   applyThresholds,
+  applyWidthThresholds,
   groupFor,
   isOwned,
   downloadExport,

@@ -239,3 +239,71 @@ class CrossSlopeTest(SimpleTestCase):
 
         self.assertAlmostEqual(restricted, 2.0, places=6)
         self.assertGreater(abs(whole - restricted), 5.0)
+
+
+class MedianSmoothTest(SimpleTestCase):
+    """Suavizado opt-in del perfil transversal (`median_smooth` + `median_kernel`).
+
+    La mediana y no una gaussiana a propósito: preserva los bordes. Un DTM fotogramétrico sobre
+    rodadura minera mete rachas de ruido que el requisito de `min_consecutive` no filtra —tres
+    subidas de 1,6 cm a paso 0,1 m son una racha del 16 % perfectamente falsa— y la mediana las
+    elimina sin desplazar el talud real.
+    """
+
+    def test_a_lone_spike_is_flattened(self):
+        elevations = [100.0] * 5 + [100.5] + [100.0] * 5
+        smoothed = profile.median_smooth(elevations, 5)
+        self.assertEqual(smoothed[5], 100.0)
+
+    def test_a_berm_step_keeps_its_edge_in_place(self):
+        # Propiedad que descarta la gaussiana: el escalón ni se desplaza ni se redondea.
+        elevations = [100.0] * 8 + [100.6] * 8
+        smoothed = profile.median_smooth(elevations, 5)
+        self.assertEqual(smoothed[7], 100.0)
+        self.assertEqual(smoothed[8], 100.6)
+
+    def test_a_missing_sample_stays_missing(self):
+        # FR-022: una cota ausente no se rellena ni con la mediana de sus vecinas.
+        elevations = [100.0, 100.0, None, 100.0, 100.0]
+        smoothed = profile.median_smooth(elevations, 3)
+        self.assertIsNone(smoothed[2])
+        self.assertEqual(smoothed[0], 100.0)
+
+    def test_missing_neighbors_are_ignored_not_propagated(self):
+        elevations = [100.0, None, 100.4, None, 100.0]
+        smoothed = profile.median_smooth(elevations, 3)
+        self.assertEqual(smoothed[2], 100.4)
+
+    def test_kernel_of_one_is_identity(self):
+        elevations = [1.0, None, 3.0]
+        self.assertEqual(profile.median_smooth(elevations, 1), elevations)
+
+    def test_kernel_size_comes_from_the_window_in_distance_units(self):
+        self.assertEqual(profile.median_kernel(0.5, 0.1), 5)
+        self.assertEqual(profile.median_kernel(0.9, 0.1), 9)
+        self.assertEqual(profile.median_kernel(5.0, 0.25), 21)
+
+    def test_a_window_narrower_than_three_samples_does_not_filter(self):
+        self.assertEqual(profile.median_kernel(0.5, 0.5), 1)
+        self.assertEqual(profile.median_kernel(0.0, 0.1), 1)
+        self.assertEqual(profile.median_kernel(0.9, 0.0), 1)
+
+    def test_smoothing_rescues_detection_from_a_sustained_noise_run(self):
+        # Tres subidas seguidas de 1,6 cm a 1,8 m del eje: a paso 0,1 son una racha del 16 % que
+        # el umbral por defecto (15 %) confunde con el borde. Suavizado con ventana de 0,5 m, la
+        # racha desaparece y el primer quiebre vuelve a ser el talud real, sin moverse del sitio.
+        bump = {1.9: 0.016, 2.0: 0.032, 2.1: 0.048}
+
+        def z(d):
+            base = -0.5 * (abs(d) - 4.0) if abs(d) > 4.0 else 0.0
+            return 100.0 + base + bump.get(round(d, 1), 0.0)
+
+        distances, elevations = build_profile(z, step=0.1)
+
+        raw = profile.detect_edges(distances, elevations, 15.0, 3)
+        self.assertAlmostEqual(raw['left']['offset'], 1.8, places=9)
+
+        smoothed = profile.median_smooth(elevations, profile.median_kernel(0.5, 0.1))
+        edges = profile.detect_edges(distances, smoothed, 15.0, 3)
+        self.assertAlmostEqual(edges['left']['offset'], 4.0, places=9)
+        self.assertAlmostEqual(edges['right']['offset'], 4.0, places=9)

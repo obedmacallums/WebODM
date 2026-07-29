@@ -95,13 +95,48 @@ test('un tramo inferido se distingue del medido y del sin-ancho a la vez', () =>
 
 // --- Regla del ancho -----------------------------------------------------------------------------
 
-test('la regla del ancho no comparte color con el semáforo y nunca es interactiva', () => {
-  const tick = style.widthTickStyle({status: 'measured'});
+test('sin umbrales de ancho la regla conserva su verde neutro y nunca es interactiva', () => {
+  // Un análisis sin ancho medio del que deducirlos, o guardado antes de que existiera el control.
+  const tick = style.widthTickStyle({status: 'measured', width: 8});
 
   assert.notStrictEqual(tick.color, palette.ok,
-    'el verde del semáforo habla de pendiente; el de la regla, de ancho: no pueden ser el mismo');
+    'sin criterio de ancho no puede fingir el verde del semáforo, que habla de pendiente');
   assert.strictEqual(tick.interactive, false);
   assert.strictEqual(tick.dashArray, null, 'un ancho medido se dibuja con trazo rotundo');
+});
+
+// --- Semáforo del ancho --------------------------------------------------------------------------
+//
+// Al revés que el de pendiente: aquí lo malo es quedarse corto. `[mínimo, holgado]`.
+
+test('el ancho pinta de rojo por debajo del mínimo y de verde por encima del holgado', () => {
+  const t = [15.0, 20.0];
+
+  assert.strictEqual(style.colorForWidth(12.0, t), palette.alert, 'estrecho es el problema');
+  assert.strictEqual(style.colorForWidth(18.0, t), palette.warn);
+  assert.strictEqual(style.colorForWidth(25.0, t), palette.ok, 'de sobra ancho');
+});
+
+test('los umbrales del ancho son inclusivos por arriba, como los de pendiente', () => {
+  const t = [15.0, 20.0];
+
+  assert.strictEqual(style.colorForWidth(15.0, t), palette.warn, 'justo en el mínimo, ya no es rojo');
+  assert.strictEqual(style.colorForWidth(20.0, t), palette.ok, 'justo en el holgado, ya es verde');
+});
+
+test('un ancho ausente no se pinta de ningún juicio', () => {
+  assert.strictEqual(style.colorForWidth(null, [15.0, 20.0]), palette.unknown);
+  assert.strictEqual(style.colorForWidth(undefined, [15.0, 20.0]), palette.unknown);
+});
+
+test('a la regla la colorea el ancho, nunca la pendiente', () => {
+  // La confusión que esto evita: un tramo empinado y ancho tiene el eje rojo y la regla verde, y
+  // las dos cosas son ciertas. Compartir paleta no puede significar compartir criterio.
+  const steepAndWide = {status: 'measured', grade: 40, width: 25};
+  const flatAndNarrow = {status: 'measured', grade: 1, width: 12};
+
+  assert.strictEqual(style.widthTickStyle(steepAndWide, [15.0, 20.0]).color, palette.ok);
+  assert.strictEqual(style.widthTickStyle(flatAndNarrow, [15.0, 20.0]).color, palette.alert);
 });
 
 test('la regla de un ancho inferido va discontinua', () => {

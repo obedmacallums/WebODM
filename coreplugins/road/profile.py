@@ -87,6 +87,44 @@ def evaluate(fit, x):
     return fit['slope'] * x + fit['intercept']
 
 
+def median_kernel(window, step):
+    """Tamaño de núcleo (impar) para una ventana de `window` unidades a paso `step`.
+
+    Devuelve `1` —filtro identidad— cuando la ventana no llega a cubrir tres muestras: suavizar
+    con menos no es suavizar, y hacerlo en silencio con otra cosa (interpolar, promediar a dos)
+    inventaría un comportamiento que nadie pidió.
+    """
+    if window <= 0 or step <= 0:
+        return 1
+    half = int((window / 2.0) / step + 1e-9)
+    return 2 * half + 1
+
+
+def median_smooth(elevations, k):
+    """Mediana móvil de núcleo `k` sobre el perfil, respetando los huecos (FR-022).
+
+    Mediana y no gaussiana a propósito: preserva los bordes —un escalón ni se desplaza ni se
+    redondea— mientras elimina las rachas cortas de ruido que el requisito de racha de
+    `detect_edges` no filtra. Una cota ausente sigue ausente (no se rellena con la mediana de sus
+    vecinas), y las ausentes dentro de la ventana simplemente no votan.
+
+    Se usa solo para **detectar**: las métricas reportadas (cotas, pendientes, bombeo) se siguen
+    midiendo sobre el dato crudo, porque suavizar es una decisión de detección, no una mejora del
+    terreno.
+    """
+    if k <= 1:
+        return list(elevations)
+    half = k // 2
+    smoothed = []
+    for i, z in enumerate(elevations):
+        if z is None:
+            smoothed.append(None)
+            continue
+        window = [e for e in elevations[max(0, i - half):i + half + 1] if e is not None]
+        smoothed.append(float(np.median(window)))
+    return smoothed
+
+
 def _center_index(distances):
     """Índice del `0.0` del perfil transversal, o el más próximo a él."""
     best, best_abs = 0, None

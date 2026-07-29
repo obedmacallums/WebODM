@@ -62,6 +62,27 @@ class ValidateParamsTest(RoadTestBase):
         self.assertEqual(params['surface_tolerance'], 0.10)
         self.assertEqual(params['coherence_window'], 2)
 
+    def test_smoothing_defaults_off(self):
+        # `smooth_window=0` ES el comportamiento anterior: el defecto no puede cambiar el
+        # resultado de ningún análisis existente, igual que los parámetros nuevos de `006`.
+        params, err = sources.validate_params({}, DEM_RES)
+
+        self.assertIsNone(err)
+        self.assertEqual(params['smooth_window'], 0.0)
+
+    def test_smoothing_accepts_its_range_and_rejects_outside(self):
+        params, err = sources.validate_params({'smooth_window': 0.9}, DEM_RES)
+        self.assertIsNone(err)
+        self.assertEqual(params['smooth_window'], 0.9)
+
+        params, err = sources.validate_params({'smooth_window': -0.1}, DEM_RES)
+        self.assertIsNone(params)
+        self.assertIn('smooth_window', str(err))
+
+        params, err = sources.validate_params({'smooth_window': 5.1}, DEM_RES)
+        self.assertIsNone(params)
+        self.assertIn('smooth_window', str(err))
+
     def test_a_fractional_window_truncates_like_the_other_integer_params(self):
         # Mismo trato que min_consecutive_samples: int() trunca, no rechaza. Documentarlo aquí
         # evita que alguien lo "arregle" en un solo sitio y deje a los dos enteros inconsistentes.
@@ -121,6 +142,54 @@ class ValidateParamsTest(RoadTestBase):
         value, err = sources.validate_color_thresholds([6.0, 10.0])
         self.assertIsNone(err)
         self.assertEqual(value, [6.0, 10.0])
+
+    def test_width_aggregation_is_an_enum_with_a_named_error(self):
+        params, err = sources.validate_params({'width_aggregation': 'moda'}, DEM_RES)
+        self.assertIsNone(params)
+        self.assertIn('width_aggregation', str(err))
+        self.assertIn('median', str(err))
+
+        for mode in sources.WIDTH_AGGREGATIONS:
+            with self.subTest(mode=mode):
+                params, err = sources.validate_params({'width_aggregation': mode}, DEM_RES)
+                self.assertIsNone(err)
+                self.assertEqual(params['width_aggregation'], mode)
+
+    def test_width_thresholds_must_be_ordered_and_positive(self):
+        # `[mínimo, holgado]` ascendente, como el par de pendiente. Lo que cambia es la lectura
+        # —por debajo del mínimo es rojo, no verde—, no la forma del dato.
+        for bad in ([20.0, 15.0], [0.0, 20.0], [-1.0, 5.0], [15.0], 'x', [15.0, 15.0]):
+            with self.subTest(value=bad):
+                value, err = sources.validate_width_thresholds(bad)
+                self.assertIsNone(value)
+                self.assertTrue(err)
+
+        value, err = sources.validate_width_thresholds([15.0, 20.0])
+        self.assertIsNone(err)
+        self.assertEqual(value, [15.0, 20.0])
+
+    def test_width_thresholds_are_derived_from_the_measured_mean(self):
+        """Sin umbrales guardados se deducen del propio análisis: una calle de 6 m y una rampa de
+        25 m necesitan escalas distintas, y una constante solo puede acertar en una de las dos."""
+        self.assertEqual(sources.derive_width_thresholds(25.0), [20.0, 25.0])
+        self.assertEqual(sources.derive_width_thresholds(6.0), [4.8, 6.0])
+
+    def test_derived_thresholds_stay_ordered_however_narrow_the_road(self):
+        # El derivado se va a validar como cualquier otro: si empatara, el propio backend
+        # rechazaría lo que él mismo produjo.
+        # 100 m es el techo real: nadie puede medir más de `2 * search_half_width` (2 x 50).
+        for mean in (0.5, 1.0, 3.33, 100.0):
+            with self.subTest(mean=mean):
+                derived = sources.derive_width_thresholds(mean)
+                self.assertLess(derived[0], derived[1])
+                self.assertIsNone(sources.validate_width_thresholds(derived)[1])
+
+    def test_without_a_measured_mean_there_is_nothing_to_derive(self):
+        # Ningún tramo con ancho: no hay regla que colorear, así que tampoco hay umbrales que
+        # inventar.
+        for empty in (None, 0.0):
+            with self.subTest(mean=empty):
+                self.assertIsNone(sources.derive_width_thresholds(empty))
 
 
 class ParamsApiTest(AnalysesApiTestBase):

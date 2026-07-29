@@ -54,6 +54,10 @@ DEM_NODATA = -9999.0
 # medio píxel de sesgo y los asertos exactos dejarían de ser posibles.
 ROAD_COL = 240
 
+# El eje sintético arranca en la fila 40, así que su progresiva 0 cae en esta progresiva del DEM.
+# Sumarlo es lo que traduce "el metro 2,5 del camino" a la franja que hay que tocar en el ráster.
+AXIS_STATION_OFFSET = (40 + 0.5) * DEM_RES
+
 DEFAULT_HALF_WIDTH = 4.0    # -> 8 m de ancho de calzada
 DEFAULT_GRADE = 0.05        # 5 % longitudinal
 DEFAULT_CROSS_SLOPE = 0.02  # 2 % de peralte hacia el este
@@ -69,11 +73,14 @@ def make_road_dem(path, size=DEM_SIZE, res=DEM_RES, origin=DEM_ORIGIN, epsg=DEM_
                   nodata=DEM_NODATA, half_width_left=DEFAULT_HALF_WIDTH,
                   half_width_right=DEFAULT_HALF_WIDTH, grade=DEFAULT_GRADE,
                   cross_slope=DEFAULT_CROSS_SLOPE, talud=DEFAULT_TALUD, base=DEFAULT_BASE,
-                  road_col=ROAD_COL, nodata_patch=None, noise=0.0, seed=7):
+                  road_col=ROAD_COL, nodata_patch=None, noise=0.0, seed=7, pinch=None):
     """Escribe el GeoTIFF del camino sintético.
 
     `talud=0.0` produce una superficie sin quiebre a los lados (el caso `no_break`).
     `nodata_patch` es `(row0, row1, col0, col1)` en celdas y sirve para el caso `no_data`.
+    `pinch` es `(station0, station1, semiancho_izq, semiancho_der)` en progresivas **del DEM**
+    (usa `AXIS_STATION_OFFSET` para pasar de progresiva del eje): estrecha o ensancha el camino
+    en esa franja, que es como se construye un camino no uniforme a lo largo.
     `noise` superpone ruido gaussiano reproducible, para comprobar que los ajustes por mínimos
     cuadrados aguantan lo que las diferencias entre extremos no aguantarían.
     """
@@ -88,9 +95,20 @@ def make_road_dem(path, size=DEM_SIZE, res=DEM_RES, origin=DEM_ORIGIN, epsg=DEM_
     d = x - road_center_x(origin, res, road_col)   # + = este = izquierda del avance
     station = origin[1] - y                        # progresiva desde el borde norte
 
-    on_road = np.where(d >= 0, d <= half_width_left, -d <= half_width_right)
-    edge_z = np.where(d >= 0, cross_slope * half_width_left, -cross_slope * half_width_right)
-    overshoot = np.where(d >= 0, d - half_width_left, -d - half_width_right)
+    # El semiancho es un array, no un escalar, para que `pinch` pueda estrecharlo en una franja
+    # de progresiva: es lo que permite construir un camino que NO es uniforme a lo largo, y sin
+    # eso no hay forma de distinguir medir el ancho una vez por tramo de medirlo varias.
+    hw_left = np.full(station.shape, float(half_width_left))
+    hw_right = np.full(station.shape, float(half_width_right))
+    if pinch is not None:
+        s0, s1, p_left, p_right = pinch
+        inside = (station >= s0) & (station < s1)
+        hw_left = np.where(inside, p_left, hw_left)
+        hw_right = np.where(inside, p_right, hw_right)
+
+    on_road = np.where(d >= 0, d <= hw_left, -d <= hw_right)
+    edge_z = np.where(d >= 0, cross_slope * hw_left, -cross_slope * hw_right)
+    overshoot = np.where(d >= 0, d - hw_left, -d - hw_right)
 
     cross = np.where(on_road, cross_slope * d, edge_z - talud * np.maximum(overshoot, 0.0))
     data = (base + grade * station + cross).astype(np.float32)

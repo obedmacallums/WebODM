@@ -224,6 +224,30 @@ def segmentize(coords, segment_length):
     return segments
 
 
+def section_stations(station_start, station_end, spacing):
+    """Progresivas de las transversales de un tramo, de la primera a la última.
+
+    Con `spacing` a 0 —el defecto— devuelve **una** progresiva, la del punto medio: el ancho se
+    mide una vez por tramo, que es como funcionó siempre. Con un espaciado positivo el tramo se
+    reparte en `n = max(1, round(longitud / spacing))` franjas iguales y se mide en el centro de
+    cada una.
+
+    Centradas y no desde el borde por dos razones: ninguna transversal cae en la junta entre
+    tramos —donde el ancho pertenecería por igual a los dos vecinos— y el reparto queda simétrico
+    respecto del punto medio, así que medir varias veces no sesga el tramo hacia su principio.
+
+    El `max(1, ...)` es lo que garantiza que un tramo más corto que el espaciado siga midiéndose:
+    quedarse sin ancho por un detalle de aritmética sería peor que medirlo una sola vez.
+    """
+    length = station_end - station_start
+    if spacing <= 0 or length <= 0:
+        return [0.5 * (station_start + station_end)]
+
+    n = max(1, int(round(length / spacing)))
+    width = length / n
+    return [station_start + (i + 0.5) * width for i in range(n)]
+
+
 def cross_section_offsets(half_width, step):
     """Distancias con signo del muestreo transversal, del lado derecho al izquierdo.
 

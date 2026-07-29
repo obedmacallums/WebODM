@@ -43,6 +43,11 @@ class FrontendUnitTest(SimpleTestCase):
         un refresco: las tres decisiones que antes obligaban a recargar la página."""
         self._run_js('panelLogic.test.js')
 
+    def test_width_tick_is_centred_on_the_axis(self):
+        """La regla del ancho se dibuja centrada en el eje aunque los bordes sean asimétricos:
+        es una decisión de dibujo, y el reparto real sigue viajando en el tramo."""
+        self._run_js('widthTick.test.js')
+
     def test_threshold_recolor_is_local_and_complete(self):
         self._run_js('thresholdRecolor.test.js')
 

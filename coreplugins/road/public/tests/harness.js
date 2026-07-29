@@ -36,10 +36,15 @@ function toEvaluable(src){
     return out.replace('export default class', 'class') + '\nreturn ' + defaultClass[1] + ';';
   }
 
-  // Exports nombrados (`export function foo`): se devuelven agrupados, como haría el import.
-  const named = Array.from(out.matchAll(/export\s+function\s+(\w+)/g), m => m[1]);
+  // Exports nombrados (`export function foo`, `export const BAR`): se devuelven agrupados,
+  // como haría el import.
+  const named = [
+    ...Array.from(out.matchAll(/export\s+function\s+(\w+)/g), m => m[1]),
+    ...Array.from(out.matchAll(/export\s+const\s+(\w+)/g), m => m[1])
+  ];
   if (named.length){
-    return out.replace(/export\s+function\s/g, 'function ') +
+    return out.replace(/export\s+function\s/g, 'function ')
+              .replace(/export\s+const\s/g, 'const ') +
            '\nreturn {' + named.join(', ') + '};';
   }
 

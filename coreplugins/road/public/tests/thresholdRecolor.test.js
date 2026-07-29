@@ -41,7 +41,8 @@ const bridge = loadModule('roadBridge.js', {
   styleForSegment: style.styleForSegment,
   reasonLabel: style.reasonLabel,
   hitStyle: style.hitStyle,
-  widthTickStyle: style.widthTickStyle
+  widthTickStyle: style.widthTickStyle,
+  widthTickPoints: loadModule("widthTick.js", {}).widthTickPoints
 });
 bridge.initBridge();
 

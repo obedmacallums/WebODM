@@ -103,6 +103,48 @@ def list_analyses(task_id):
     return get_document(task_id)['analyses']
 
 
+def get_thresholds(document):
+    """Umbrales de color de la **tarea**, `{'color': [...] | None, 'width': [...] | None}`.
+
+    Viven en el documento y no en cada análisis porque son una preferencia de lectura del usuario,
+    no una propiedad de un camino: quien mueve el deslizador quiere ver todos sus caminos con el
+    mismo criterio, y tener que repetir el ajuste en cada uno era trabajo inventado.
+
+    Compatibilidad: un documento anterior a este cambio no tiene umbrales propios, así que se
+    siembran con los del análisis más reciente que los llevara. Sin eso, el primer usuario que
+    abriera el panel tras actualizar vería sus ajustes revertidos a los de fábrica.
+    """
+    stored = document.get('thresholds') or {}
+    color = stored.get('color')
+    if not color:
+        color = _latest_analysis_value(document, 'color_thresholds')
+    return {'color': color, 'width': stored.get('width')}
+
+
+def _latest_analysis_value(document, key):
+    """Valor de `key` en el análisis más reciente que lo tenga, por `updated_at`."""
+    best, best_stamp = None, ''
+    for analysis in document.get('analyses') or []:
+        value = analysis.get(key)
+        if not value:
+            continue
+        stamp = analysis.get('updated_at') or analysis.get('created_at') or ''
+        if best is None or stamp >= best_stamp:
+            best, best_stamp = value, stamp
+    return best
+
+
+def set_thresholds(task_id, changes):
+    """Fija los umbrales de la tarea. `changes` es `{'color': [...]}`, `{'width': [...]}` o ambos."""
+    with document_lock(task_id):
+        doc = get_document(task_id)
+        thresholds = dict(doc.get('thresholds') or {})
+        thresholds.update(changes)
+        doc['thresholds'] = thresholds
+        set_document(task_id, doc)
+    return thresholds
+
+
 def get_analysis(task_id, analysis_id):
     for a in list_analyses(task_id):
         if a.get('id') == analysis_id:

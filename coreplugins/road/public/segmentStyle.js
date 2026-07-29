@@ -102,19 +102,43 @@ export function hitStyle(){
   };
 }
 
-// Regla del ancho: la transversal de borde a borde que materializa la medida sobre el mapa.
+// Semáforo del ancho: `[mínimo, holgado]` en metros, **al revés** que el de pendiente.
 //
-// Verde vivo, deliberadamente distinto del verde del semáforo (`#2e9e4f`): el semáforo habla de
-// pendiente y esta línea habla de ancho — compartir color mezclaría los dos mensajes. Se dibuja
-// por DEBAJO del tramo, así el eje coloreado la cruza por encima y el conjunto se lee como una
-// regla graduada: donde no hay regla, no hay ancho medido.
+// En un camino lo malo es quedarse corto, así que por debajo del mínimo es rojo y por encima del
+// holgado es verde. Los dos umbrales son inclusivos por arriba, igual que los de pendiente: quien
+// pone el mínimo en 15 m espera que un tramo de 15 m clavados ya no esté en rojo.
+export function colorForWidth(width, thresholds){
+  const palette = colors();
+  if (width === null || width === undefined || isNaN(width)) return palette.unknown;
+  const [low, high] = thresholds;
+  if (width < low) return palette.alert;
+  if (width < high) return palette.warn;
+  return palette.ok;
+}
+
+// Verde neutro de la regla cuando no hay criterio de ancho con el que juzgarla: un análisis sin
+// ancho medio del que deducir umbrales, o guardado antes de que el control existiera. Distinto del
+// verde del semáforo a propósito — sin umbrales, la regla no está aprobando nada.
+const WIDTH_TICK_NEUTRAL = '#1fe063';
+
+// Regla del ancho: la transversal que materializa la medida sobre el mapa.
+//
+// Se dibuja por DEBAJO del tramo, así el eje coloreado la cruza por encima y el conjunto se lee
+// como una regla graduada: donde no hay regla, no hay ancho medido.
+//
+// Comparte paleta con el semáforo de pendiente pero **no criterio**: el color del eje lo decide la
+// pendiente y el de la regla, el ancho. Un tramo empinado y ancho sale con el eje rojo y la regla
+// verde, y las dos cosas son ciertas. Lo que las distingue a la vista es la geometría —una va a lo
+// largo y la otra cruzada—, no el tono; tres colores propios solo para la regla habrían obligado
+// al usuario a aprenderse dos paletas.
 //
 // En un tramo `inferred` la regla va discontinua, igual que su tramo: un ancho deducido de los
 // vecinos no puede dibujarse con el mismo trazo rotundo que uno medido.
-export function widthTickStyle(segment){
+export function widthTickStyle(segment, thresholds){
   const inferred = segment && segment.status === 'inferred';
   return {
-    color: '#1fe063',
+    color: thresholds ? colorForWidth(segment ? segment.width : null, thresholds)
+                      : WIDTH_TICK_NEUTRAL,
     weight: 3,
     opacity: 0.9,
     dashArray: inferred ? '5,4' : null,

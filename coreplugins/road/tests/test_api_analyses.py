@@ -59,7 +59,11 @@ class CreateAnalysisTest(AnalysesApiTestBase):
         self.assertEqual(analysis['params']['break_threshold'], 15.0)
         self.assertEqual(analysis['model'], 'dtm')
         self.assertEqual(analysis['variant'], 'original')
-        self.assertEqual(analysis['color_thresholds'], [8.0, 12.0])
+        # Los umbrales de color no viven en el análisis sino en la tarea: son una preferencia de
+        # lectura compartida por todos sus caminos.
+        self.assertNotIn('color_thresholds', analysis)
+        listed = self.client.get(self._url(task, 'analyses')).data['analyses'][0]
+        self.assertEqual(listed['color_thresholds'], [8.0, 12.0])
 
     def test_the_analysis_keeps_its_own_copy_of_the_axis(self):
         task = self._task_with_dem()

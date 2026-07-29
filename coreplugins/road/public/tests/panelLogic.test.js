@@ -106,6 +106,51 @@ test('la reserva en vuelo (true) cuenta como publicado', () => {
   assert.strictEqual(logic.publishAction(true, {status: 'completed'}), 'none');
 });
 
+// --- Preset "camino minero" ------------------------------------------------------------------
+//
+// Los valores salen de la validación sobre perfiles sintéticos de rampa minera (25 m de calzada,
+// ruido sigma=1,5 cm): semiancho 20 para que los bordes quepan, paso 0,5 para que la base de la
+// derivada supere el ruido, umbral 25 entre el bombeo y el talud, y coherencia activada.
+
+test('el preset minero rellena sus valores sin tocar lo que no le concierne', () => {
+  const params = Object.assign({}, DEFAULTS, {segment_length: 7, edge_mode: 'surface',
+                                              surface_tolerance: 0.10});
+  const out = logic.applyPreset(params, logic.MINING_PRESET);
+
+  assert.strictEqual(out.edge_mode, 'break');
+  assert.strictEqual(out.search_half_width, 20);
+  assert.strictEqual(out.sample_step, 0.5);
+  assert.strictEqual(out.break_threshold, 25);
+  assert.strictEqual(out.coherence_window, 3);
+  assert.strictEqual(out.segment_length, 7,
+    'la longitud de tramo es del usuario: el preset no opina sobre ella');
+  assert.strictEqual(out.surface_tolerance, 0.10,
+    'los parámetros del otro modo se conservan por si vuelve a él');
+});
+
+test('el preset trae puesto el antirruido que un DTM minero necesita', () => {
+  // Los cuatro valores que separan medir el camino de medir el ruido, medidos sobre un DTM real:
+  // sin ellos las diez transversales de un tramo devolvían anchos de 1,5 a 12 m en una calzada
+  // de ancho constante.
+  const out = logic.applyPreset({}, logic.MINING_PRESET);
+
+  assert.strictEqual(out.min_consecutive_samples, 4,
+    'a paso 0,5 son 2 m de quiebre sostenido: un talud lo cumple, una racha de ruido no');
+  assert.strictEqual(out.smooth_window, 2,
+    'con paso 0,5 la ventana necesita 1,5 m para actuar; por debajo es identidad');
+  assert.strictEqual(out.cross_section_spacing, 1,
+    'el ancho deja de ser una muestra puntual del punto medio del tramo');
+  assert.strictEqual(out.width_aggregation, 'median',
+    'con anchos dispersos la media arrastra con cada borde falso');
+});
+
+test('aplicar el preset no muta los parámetros de partida', () => {
+  const params = Object.assign({}, DEFAULTS);
+  const out = logic.applyPreset(params, logic.MINING_PRESET);
+  assert.notStrictEqual(out, params);
+  assert.deepStrictEqual(params, DEFAULTS);
+});
+
 // --- axisSelection: qué eje queda elegido tras refrescar la lista ----------------------------
 
 const AXES = [{id: 'ax1', name: 'camino'}, {id: 'ax2', name: 'rampa'}];

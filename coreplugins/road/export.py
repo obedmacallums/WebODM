@@ -20,6 +20,10 @@ CSV_COLUMNS = [
     'right_reason',
     # Al final a propósito (`006` FR-033): quien lea el CSV por posición de columna no se rompe.
     'left_edge_source', 'right_edge_source',
+    # Dispersión del ancho dentro del tramo. Con una transversal por tramo —el defecto— los tres
+    # son constantes y redundantes; con varias, son lo que distingue un camino uniforme de uno que
+    # se estrecha, y quien analice el CSV los necesita tanto como la mediana.
+    'width_min', 'width_max', 'width_sections', 'width_measured_sections',
 ]
 
 # De qué campo del tramo sale cada columna, cuando el nombre no coincide.
@@ -92,7 +96,8 @@ def _segment_feature(segment):
     properties.update({key: segment.get(key) for key in (
         'index', 'station_start', 'station_end', 'length', 'elevation', 'grade', 'grade_deg',
         'width', 'offset_left', 'offset_right', 'cross_slope', 'status', 'left_reason',
-        'right_reason', 'left_edge_source', 'right_edge_source')})
+        'right_reason', 'left_edge_source', 'right_edge_source',
+        'width_min', 'width_max', 'width_sections', 'width_measured_sections')})
     return {
         'type': 'Feature',
         'geometry': {'type': 'LineString', 'coordinates': segment['geometry']},

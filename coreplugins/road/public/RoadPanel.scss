@@ -171,6 +171,11 @@
   .road-params{
     margin-bottom: 8px;
 
+    .road-param-actions{
+      display: flex;
+      gap: 12px;
+    }
+
     .road-range{
       font-size: 11px;
       color: #888;
@@ -196,8 +201,24 @@
     .btn{ margin-right: 4px; }
   }
 
+  // Los umbrales gobiernan toda la tarea, así que van en su propio bloque bajo la lista de
+  // análisis y no dentro de cada uno: el separador es lo que dice que ya no pertenecen a ninguno.
+  .road-shared-thresholds{
+    border-top: 1px solid #eee;
+    margin-top: 8px;
+    padding-top: 6px;
+  }
+
   .road-thresholds{
     margin-top: 4px;
+
+    // Con dos semáforos seguidos —pendiente y ancho— y cuatro deslizadores casi idénticos, el
+    // rótulo es lo único que dice cuál gobierna qué.
+    .road-threshold-title{
+      font-size: 11px;
+      color: #666;
+      margin-bottom: 1px;
+    }
 
     label{
       display: flex;

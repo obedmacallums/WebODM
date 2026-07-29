@@ -38,12 +38,14 @@ const $ = {
 };
 
 const style = loadModule('segmentStyle.js', {});
+const tick = loadModule('widthTick.js', {});
 const bridge = loadModule('roadBridge.js', {
   L, PluginsAPI, $, _: (s) => s,
   styleForSegment: style.styleForSegment,
   reasonLabel: style.reasonLabel,
   hitStyle: style.hitStyle,
-  widthTickStyle: style.widthTickStyle
+  widthTickStyle: style.widthTickStyle,
+  widthTickPoints: tick.widthTickPoints
 });
 
 const map = {addLayer(){}, hasLayer(){ return true; }, removeLayer(){}};
@@ -123,12 +125,42 @@ test('cada tramo con dos bordes dibuja su regla de borde a borde, bajo el eje', 
   });
 });
 
-test('la regla une exactamente los dos puntos de borde del tramo', () => {
-  const seg = segment(0, {edge_left: [0.004, 0.001], edge_right: [-0.004, 0.001]});
+test('la regla une los dos puntos de borde cuando la calzada está centrada', () => {
+  const mid = [0, 0.001];
+  const seg = segment(0, {midpoint: mid,
+                          edge_left: [0.004, 0.001], edge_right: [-0.004, 0.001]});
   const {group} = publish('task-1', [seg]);
   const coords = ticks(group)[0].getLatLngs().map(ll => [ll.lng, ll.lat]);
 
   assert.deepStrictEqual(coords, [seg.edge_left, seg.edge_right]);
+});
+
+test('con la calzada volcada la regla se recoloca centrada en el eje', () => {
+  // 9 m a la izquierda y 3 a la derecha: la regla dibuja los 12 m repartidos 6 y 6. El reparto
+  // real no se pierde — sigue en el popup y en la exportación.
+  const mid = [0.0005, 0.001];
+  const u = 0.00001;   // grados de lng por metro; aquí la normal apunta al este
+  const seg = segment(0, {
+    midpoint: mid, width: 12, offset_left: 9, offset_right: 3,
+    edge_left: [mid[0] + 9 * u, mid[1]], edge_right: [mid[0] - 3 * u, mid[1]]
+  });
+  const {group} = publish('task-1', [seg]);
+  const coords = ticks(group)[0].getLatLngs().map(ll => [ll.lng, ll.lat]);
+
+  const center = (coords[0][0] + coords[1][0]) / 2;
+  assert.ok(Math.abs(center - mid[0]) < 1e-12, 'el centro de la regla cae sobre el eje');
+  assert.ok(Math.abs(coords[0][0] - (mid[0] + 6 * u)) < 1e-12, 'mitad del ancho a la izquierda');
+  assert.ok(Math.abs(coords[1][0] - (mid[0] - 6 * u)) < 1e-12, 'mitad del ancho a la derecha');
+});
+
+test('recolocar la regla no toca lo que dice el popup', () => {
+  // El dibujo se centra; el dato no. Un tramo volcado tiene que seguir declarando sus dos
+  // distancias reales, que es lo que el usuario va a leer y exportar.
+  const html = bridge.popupHtml(segment(0, {width: 12, offset_left: 9, offset_right: 3}));
+
+  assert.ok(html.includes('9.00 m'), 'la distancia real al borde izquierdo');
+  assert.ok(html.includes('3.00 m'), 'la distancia real al borde derecho');
+  assert.ok(html.includes('12.00 m'), 'y el ancho total');
 });
 
 test('sin uno de los bordes no hay regla: la ausencia es información', () => {
@@ -141,7 +173,7 @@ test('sin uno de los bordes no hay regla: la ausencia es información', () => {
   assert.strictEqual(ticks(group).length, 1, 'solo el tramo con ambos bordes lleva regla');
 });
 
-test('recolorear por umbrales no toca las reglas', () => {
+test('recolorear por umbrales de pendiente no toca las reglas', () => {
   const {analysis, group} = publish();
   const before = ticks(group).map(t => t.options.color);
 
@@ -149,6 +181,86 @@ test('recolorear por umbrales no toca las reglas', () => {
 
   assert.deepStrictEqual(ticks(group).map(t => t.options.color), before,
     'la regla habla de ancho: el semáforo de pendiente no debe alcanzarla');
+});
+
+// --- Semáforo del ancho --------------------------------------------------------------------------
+
+test('la regla nace con el color que le toca por su ancho', () => {
+  const palette = style.colors();
+  const segments = [segment(0, {width: 4}), segment(1, {width: 8}), segment(2, {width: 12})];
+  const analysis = {id: 'w1', name: 'Camino', color_thresholds: [8, 12],
+                    width_thresholds: [6, 10]};
+  const group = bridge.publishAnalysis(map, {id: 'task-1'}, analysis, segments, {stored: true});
+
+  assert.deepStrictEqual(ticks(group).map(t => t.options.color),
+                         [palette.alert, palette.warn, palette.ok]);
+});
+
+test('mover los umbrales de ancho recolorea las reglas al instante y sin pedir nada', () => {
+  const palette = style.colors();
+  const analysis = {id: 'w2', name: 'Camino', color_thresholds: [8, 12],
+                    width_thresholds: [6, 10]};
+  const group = bridge.publishAnalysis(map, {id: 'task-1'}, analysis,
+                                       [segment(0, {width: 8})], {stored: true});
+  ajaxUrls.length = 0;
+
+  assert.strictEqual(ticks(group)[0].options.color, palette.warn);
+  assert.strictEqual(bridge.applyWidthThresholds(analysis.id, [4, 6]), true);
+
+  assert.strictEqual(ticks(group)[0].options.color, palette.ok, '8 m ya pasa el holgado de 6');
+  assert.deepStrictEqual(ajaxUrls, [], 'recolorear no puede pedir nada al servidor');
+});
+
+test('recolorear por umbrales de ancho no toca los ejes', () => {
+  const analysis = {id: 'w3', name: 'Camino', color_thresholds: [8, 12],
+                    width_thresholds: [6, 10]};
+  const group = bridge.publishAnalysis(map, {id: 'task-1'}, analysis,
+                                       [segment(0, {width: 8, grade: 3})], {stored: true});
+  const before = lines(group).map(l => l.options.color);
+
+  bridge.applyWidthThresholds(analysis.id, [20, 30]);
+
+  assert.deepStrictEqual(lines(group).map(l => l.options.color), before,
+    'la simetría del caso anterior: el ancho no habla de pendiente');
+});
+
+test('un ancho inferido conserva su trazo discontinuo al recolorear', () => {
+  const analysis = {id: 'w4', name: 'Camino', color_thresholds: [8, 12],
+                    width_thresholds: [6, 10]};
+  const group = bridge.publishAnalysis(map, {id: 'task-1'}, analysis,
+                                       [segment(0, {width: 8, status: 'inferred'})],
+                                       {stored: true});
+
+  bridge.applyWidthThresholds(analysis.id, [4, 6]);
+
+  assert.ok(ticks(group)[0].options.dashArray,
+    'lo deducido no puede pasar por medido solo porque cambió el color');
+});
+
+test('recolorear el ancho de un análisis que no está publicado no revienta', () => {
+  assert.strictEqual(bridge.applyWidthThresholds('no-existe', [4, 6]), false);
+});
+
+// --- Ancho medido varias veces por tramo ---------------------------------------------------------
+
+test('con varias transversales el popup enseña el rango y cuántas midieron', () => {
+  const html = bridge.popupHtml(segment(0, {
+    width: 8, width_sections: 5, width_measured_sections: 4, width_min: 4, width_max: 8.4
+  }));
+
+  assert.ok(html.includes('8.00 m'), 'la cifra principal sigue siendo el ancho representativo');
+  assert.ok(html.includes('4.00–8.40 m'), 'el rango revela que el tramo no es uniforme');
+  assert.ok(html.includes('4/5'), 'y cuántas de las transversales llegaron a medir');
+});
+
+test('con una sola transversal no se enseña ningún rango', () => {
+  // "8,00 m (8,00-8,00 m, 1/1)" sería ruido: no hay dispersión que contar.
+  const html = bridge.popupHtml(segment(0, {
+    width: 8, width_sections: 1, width_measured_sections: 1, width_min: 8, width_max: 8
+  }));
+
+  assert.ok(html.includes('8.00 m'));
+  assert.ok(!html.includes('1/1'), 'medir una vez no es una estadística');
 });
 
 // --- Recoloreado sin recálculo -----------------------------------------------------------------
