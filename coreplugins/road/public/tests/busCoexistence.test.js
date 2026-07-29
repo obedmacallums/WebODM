@@ -14,7 +14,7 @@ setupDom();
 const L = require('leaflet');
 
 // --- Bus del core, con su regla de parada -------------------------------------------------
-const bus = {toggle: [], del: [], download: []};
+const bus = {toggle: [], del: [], download: [], add: []};
 
 function dispatch(channel, ...args){
   for (const {owner, fn} of bus[channel]){
@@ -29,6 +29,7 @@ const PluginsAPI = {Map: {
   onToggleAnnotation: (fn) => bus.toggle.push({owner: currentOwner, fn}),
   onDeleteAnnotation: (fn) => bus.del.push({owner: currentOwner, fn}),
   onDownloadAnnotations: (fn) => bus.download.push({owner: currentOwner, fn}),
+  onAddAnnotation: (fn) => bus.add.push({owner: currentOwner, fn}),
   addAnnotation: () => {},
   updateAnnotation: () => {},
   annotationDeleted: () => {}
@@ -111,6 +112,14 @@ test('un layer que no es de nadie recorre el bus entero sin efecto', () => {
   ajaxUrls.length = 0;
   assert.strictEqual(dispatch('del', {}), null);
   assert.deepStrictEqual(ajaxUrls, []);
+});
+
+// --- Anotaciones nuevas --------------------------------------------------------------------
+
+test('una anotación nueva recorre el canal add sin que road la consuma', () => {
+  // `road` escucha este canal para refrescar su lista de ejes, pero el evento debe llegar
+  // intacto a su destinatario real (el panel de capas del core).
+  assert.strictEqual(dispatch('add', {}, 'camino nuevo', {id: 'task-1'}, false), null);
 });
 
 // --- Mostrar y ocultar ---------------------------------------------------------------------

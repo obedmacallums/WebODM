@@ -31,6 +31,15 @@ function setDeletionNotifier(fn){
   deletionNotifier = fn || null;
 }
 
+// Y de una anotación nueva de cualquier otro productor: una polilínea recién trazada en
+// `annotations` es un eje candidato, y sin este aviso la lista de ejes del panel solo se
+// actualizaba recargando la página.
+let annotationAddedNotifier = null;
+
+function setAnnotationAddedNotifier(fn){
+  annotationAddedNotifier = fn || null;
+}
+
 function reportError(message){
   if (errorNotifier) errorNotifier(message);
 }
@@ -316,6 +325,15 @@ function initBridge(){
     return true;
   });
 
+  // Escucha informativa, jamás consume: el destinatario real de `addAnnotation` es el panel de
+  // capas del core, y devolver truthy aquí le robaría la anotación a todo el mundo. Los grupos
+  // propios se ignoran — un análisis de road no es un eje nuevo, y avisar sobre él encadenaría
+  // refresco → publicación → aviso en bucle.
+  PluginsAPI.Map.onAddAnnotation((layer) => {
+    if (!registry.has(layer) && annotationAddedNotifier) annotationAddedNotifier();
+    return false;
+  });
+
   PluginsAPI.Map.onDownloadAnnotations(() => {
     // Siempre `false`: la exportación de `road` es CSV y GeoJSON con su propio esquema y se pide
     // desde su panel. Devolver `true` aquí secuestraría el botón genérico del panel de capas y
@@ -328,6 +346,7 @@ export default {
   initBridge,
   setErrorNotifier,
   setDeletionNotifier,
+  setAnnotationAddedNotifier,
   publishAnalysis,
   unpublishAnalysis,
   renameAnalysis,

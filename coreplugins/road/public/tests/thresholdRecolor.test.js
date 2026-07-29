@@ -19,6 +19,7 @@ const PluginsAPI = {Map: {
   onToggleAnnotation: (fn) => { handlers.toggle = fn; },
   onDeleteAnnotation: (fn) => { handlers.del = fn; },
   onDownloadAnnotations: (fn) => { handlers.download = fn; },
+  onAddAnnotation: () => {},
   addAnnotation: () => {},
   updateAnnotation: () => {},
   annotationDeleted: () => {}

@@ -38,6 +38,11 @@ class FrontendUnitTest(SimpleTestCase):
     def test_road_bridge_coexists_on_the_core_bus(self):
         self._run_js('roadBridge.test.js')
 
+    def test_panel_logic_decisions(self):
+        """Siembra de parámetros, ciclo publicar/despublicar del sondeo y selección de eje tras
+        un refresco: las tres decisiones que antes obligaban a recargar la página."""
+        self._run_js('panelLogic.test.js')
+
     def test_threshold_recolor_is_local_and_complete(self):
         self._run_js('thresholdRecolor.test.js')
 

@@ -18,6 +18,7 @@ const PluginsAPI = {Map: {
   onToggleAnnotation: (fn) => { handlers.toggle = fn; },
   onDeleteAnnotation: (fn) => { handlers.del = fn; },
   onDownloadAnnotations: (fn) => { handlers.download = fn; },
+  onAddAnnotation: (fn) => { handlers.add = fn; },
   addAnnotation: (...args) => busCalls.push(['addAnnotation', ...args]),
   updateAnnotation: () => {},
   annotationDeleted: (layer) => busCalls.push(['annotationDeleted', layer])
@@ -195,6 +196,41 @@ test('mostrar y ocultar solo actúa sobre los grupos propios', () => {
   const {group} = publish();
   assert.strictEqual(handlers.toggle(group, false), true);
   assert.strictEqual(handlers.toggle(group, true), true);
+});
+
+// --- Anotaciones nuevas de otros productores ---------------------------------------------------
+//
+// Una polilínea recién trazada en `annotations` es un eje candidato: el panel necesita enterarse
+// para refrescar su lista sin que el usuario recargue la página. El bridge escucha `addAnnotation`
+// pero NUNCA lo consume — es un evento informativo cuyo destinatario real es el panel de capas.
+
+test('una anotación ajena dispara el aviso de eje nuevo y no se consume el evento', () => {
+  const added = [];
+  bridge.setAnnotationAddedNotifier(() => added.push(1));
+
+  assert.strictEqual(handlers.add({}, 'camino nuevo', {id: 'task-1'}, false), false,
+    'el evento debe seguir su curso hacia el resto de manejadores');
+  assert.strictEqual(added.length, 1, 'el panel recibe el aviso para refrescar los ejes');
+
+  bridge.setAnnotationAddedNotifier(null);
+});
+
+test('publicar un análisis propio no dispara el aviso de eje nuevo', () => {
+  const added = [];
+  bridge.setAnnotationAddedNotifier(() => added.push(1));
+
+  const {group} = publish();
+  assert.strictEqual(handlers.add(group, 'Camino', {id: 'task-1'}, true), false,
+    'tampoco sobre lo propio se consume el evento');
+  assert.strictEqual(added.length, 0,
+    'un análisis de road no es un eje nuevo: refrescar aquí sería un bucle');
+
+  bridge.setAnnotationAddedNotifier(null);
+});
+
+test('sin panel montado el aviso simplemente no ocurre', () => {
+  bridge.setAnnotationAddedNotifier(null);
+  assert.strictEqual(handlers.add({}, 'camino', {id: 'task-1'}, false), false);
 });
 
 // --- Borrado desde el panel de capas del core --------------------------------------------------

@@ -34,6 +34,7 @@ const PluginsAPI = {Map: {
   onToggleAnnotation: () => {},
   onDeleteAnnotation: () => {},
   onDownloadAnnotations: () => {},
+  onAddAnnotation: () => {},
   addAnnotation: () => {},
   updateAnnotation: () => {},
   annotationDeleted: () => {}

@@ -4,6 +4,7 @@ import './RoadPanel.scss';
 import ErrorMessage from 'webodm/components/ErrorMessage';
 import { _ } from 'webodm/classes/gettext';
 import bridge from './roadBridge';
+import { initialParams, publishAction, axisSelection } from './panelLogic';
 import { colors } from './segmentStyle';
 
 const POLL_INTERVAL = 1500;
@@ -60,7 +61,10 @@ export default class RoadPanel extends React.Component {
 
     this._poll = null;
     this._thresholdSaves = {}; // analysisId -> timeout del PATCH diferido
-    this._published = {};      // analysisId -> L.FeatureGroup
+    this._published = {};      // analysisId -> L.FeatureGroup, o `true` si el GET está en vuelo
+    this._paramsSeeded = false;   // el formulario solo se siembra una vez: después manda el usuario
+    this._analysesLoaded = false; // la siembra necesita capabilities Y la primera lista de análisis
+    this._axisRefresh = null;     // timeout del refresco de ejes agrupado
   }
 
   // El panel opera sobre una única tarea: las métricas de un camino pertenecen a un DEM concreto,
@@ -74,6 +78,7 @@ export default class RoadPanel extends React.Component {
     bridge.initBridge();
     bridge.setErrorNotifier(this.handleBridgeError);
     bridge.setDeletionNotifier(this.handleBridgeDeletion);
+    bridge.setAnnotationAddedNotifier(this.handleAnnotationAdded);
     if (this.singleTask()){
       this.loadCapabilities();
       this.loadAnalyses();
@@ -82,11 +87,39 @@ export default class RoadPanel extends React.Component {
     }
   }
 
+  componentDidUpdate(prevProps){
+    // Reabrir el panel es el otro momento de preguntarse si hay ejes nuevos: cubre lo trazado o
+    // borrado en `annotations` mientras este panel estaba cerrado (sigue montado, pero el usuario
+    // no veía su lista).
+    if (!prevProps.isShowed && this.props.isShowed) this.refreshAxes();
+  }
+
   componentWillUnmount(){
     bridge.setErrorNotifier(null);
     bridge.setDeletionNotifier(null);
+    bridge.setAnnotationAddedNotifier(null);
     this.stopPolling();
     Object.values(this._thresholdSaves).forEach(clearTimeout);
+    clearTimeout(this._axisRefresh);
+  }
+
+  // Al cargar el mapa, `annotations` publica sus polilíneas guardadas en ráfaga — una llamada por
+  // anotación. El refresco diferido las agrupa en una sola petición de capabilities.
+  handleAnnotationAdded = () => {
+    clearTimeout(this._axisRefresh);
+    this._axisRefresh = setTimeout(this.refreshAxes, 400);
+  }
+
+  // Refresca la lista de ejes sin tocar nada más: ni los parámetros que el usuario esté editando
+  // ni el modelo elegido. Si el eje seleccionado sigue existiendo, se respeta.
+  refreshAxes = () => {
+    if (!this.singleTask() || !this.state.capabilities) return;
+    $.getJSON(`${this.apiBase()}/capabilities`)
+      .done(caps => this.setState({
+        capabilities: caps,
+        selectedAxis: axisSelection(caps.axes, this.state.selectedAxis)
+      }));
+      // Sin .fail a propósito: es un refresco oportunista y la lista puede quedarse como estaba.
   }
 
   handleBridgeError = (message) => this.setState({error: message});
@@ -109,18 +142,41 @@ export default class RoadPanel extends React.Component {
           params: Object.assign({}, caps.defaults),
           selectedModel: caps.default_model || "",
           selectedAxis: caps.axes.length ? caps.axes[0].id : ""
-        });
+        }, this.seedParams);
       })
       .fail(req => this.setState({
         error: this.errorFrom(req, _("No se pudieron leer las opciones de esta tarea."))
       }));
   }
 
+  // El formulario arranca con los parámetros del último análisis lanzado —que persisten en el
+  // servidor dentro de cada análisis—, no con los de fábrica: iterar sobre un camino es afinar
+  // valores, y perderlos en cada recarga obligaba a reteclearlos. Solo una vez por montaje: el
+  // sondeo vuelve a pasar por aquí cada segundo y medio, y pisar lo que el usuario esté editando
+  // sería peor que el defecto.
+  seedParams = () => {
+    if (this._paramsSeeded || !this.state.capabilities || !this._analysesLoaded) return;
+    this._paramsSeeded = true;
+    if (this.state.analyses.length){
+      this.setState({params: initialParams(this.state.capabilities.defaults,
+                                           this.state.analyses)});
+    }
+  }
+
   loadAnalyses = () => {
     $.getJSON(`${this.apiBase()}/analyses`)
       .done(res => {
-        this.setState({analyses: res.analyses, running: res.running, loading: false});
-        res.analyses.forEach(a => this.publish(a));
+        this._analysesLoaded = true;
+        this.setState({analyses: res.analyses, running: res.running, loading: false},
+                      this.seedParams);
+        // El servidor reutiliza el id al recalcular sobre el mismo eje, así que "ya publicado" no
+        // significa "al día": un análisis publicado que vuelve a estar en marcha es un recálculo
+        // pisándolo y su dibujo viejo se retira ya — esperar al refresco de página era el bug.
+        res.analyses.forEach(a => {
+          const action = publishAction(this._published[a.id], a);
+          if (action === 'unpublish') this.unpublish(a.id);
+          else if (action === 'publish') this.publish(a);
+        });
         if (res.running) this.startPolling(); else this.stopPolling();
       })
       .fail(req => this.setState({
@@ -148,6 +204,9 @@ export default class RoadPanel extends React.Component {
     this._published[analysis.id] = true; // reserva inmediata: el GET tarda y el sondeo no espera
     $.getJSON(`${this.apiBase()}/analyses/${analysis.id}`)
       .done(detail => {
+        // Si un recálculo soltó la reserva mientras el GET volaba, este detalle ya es viejo:
+        // dibujarlo pintaría el resultado anterior sobre un análisis que está corriendo.
+        if (this._published[analysis.id] !== true) return;
         this._published[analysis.id] = bridge.publishAnalysis(
           this.props.map, this.singleTask(), detail, detail.segments, {stored: true});
       })
@@ -157,11 +216,10 @@ export default class RoadPanel extends React.Component {
       });
   }
 
-  republish(analysis){
-    const group = this._published[analysis.id];
+  unpublish(analysisId){
+    const group = this._published[analysisId];
+    delete this._published[analysisId];
     if (group && group !== true) bridge.unpublishAnalysis(group);
-    delete this._published[analysis.id];
-    this.publish(analysis);
   }
 
   // Al pasar a `surface` se propone una ventana de coherencia de 2 si el usuario no la había
@@ -239,9 +297,7 @@ export default class RoadPanel extends React.Component {
   handleDelete = (analysis) => {
     $.ajax({url: `${this.apiBase()}/analyses/${analysis.id}`, type: 'DELETE'})
       .done(() => {
-        const group = this._published[analysis.id];
-        if (group && group !== true) bridge.unpublishAnalysis(group);
-        delete this._published[analysis.id];
+        this.unpublish(analysis.id);
         this.loadAnalyses();
       })
       .fail(req => this.setState({error: this.errorFrom(req, _("No se pudo eliminar."))}));
