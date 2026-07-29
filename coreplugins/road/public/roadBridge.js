@@ -1,7 +1,7 @@
 import L from 'leaflet';
 import PluginsAPI from 'webodm/classes/plugins/API';
 import { _ } from 'webodm/classes/gettext';
-import { styleForSegment, reasonLabel, haloStyleFor, hitStyle } from './segmentStyle';
+import { styleForSegment, reasonLabel, haloStyleFor, hitStyle, widthTickStyle } from './segmentStyle';
 
 // Diálogo con el bus de anotaciones del core (`contracts/consumed-contracts.md` §3).
 //
@@ -88,8 +88,21 @@ function popupHtml(segment){
 // (`hitStyle`, con el porqué medido). La interactiva es la segunda —el hover, el click y el popup
 // van por ella—, así que es también la que lleva el `_roadSegment` con el que el resto del bridge
 // reconoce lo suyo; la visible se dibuja ya sin interacción y se alcanza desde `_roadLine`.
+//
+// Y una tercera cuando el tramo tiene ancho: la **regla del ancho**, la transversal de borde a
+// borde (`edge_left` → `edge_right`, que ya viajan en el tramo). Va primero en la lista para
+// quedar bajo el eje coloreado, y sin interacción para no robarle el click al área de captura.
+// Donde falta un borde no hay regla: la ausencia es información, no un hueco a rellenar.
 function buildGroup(segments, thresholds){
   const layers = [];
+  segments.forEach(segment => {
+    if (segment.edge_left && segment.edge_right){
+      const tick = L.polyline(toLatLngs([segment.edge_left, segment.edge_right]),
+                              widthTickStyle(segment));
+      tick._roadWidthTick = true;
+      layers.push(tick);
+    }
+  });
   segments.forEach(segment => {
     const latlngs = toLatLngs(segment.geometry);
 

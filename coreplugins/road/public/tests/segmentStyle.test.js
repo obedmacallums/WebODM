@@ -93,6 +93,23 @@ test('un tramo inferido se distingue del medido y del sin-ancho a la vez', () =>
   assert.strictEqual(measured.dashArray, null);
 });
 
+// --- Regla del ancho -----------------------------------------------------------------------------
+
+test('la regla del ancho no comparte color con el semáforo y nunca es interactiva', () => {
+  const tick = style.widthTickStyle({status: 'measured'});
+
+  assert.notStrictEqual(tick.color, palette.ok,
+    'el verde del semáforo habla de pendiente; el de la regla, de ancho: no pueden ser el mismo');
+  assert.strictEqual(tick.interactive, false);
+  assert.strictEqual(tick.dashArray, null, 'un ancho medido se dibuja con trazo rotundo');
+});
+
+test('la regla de un ancho inferido va discontinua', () => {
+  // La convención de honestidad alcanza también a la regla: lo deducido no se dibuja igual que
+  // lo medido.
+  assert.ok(style.widthTickStyle({status: 'inferred'}).dashArray);
+});
+
 // --- Área de captura del cursor ------------------------------------------------------------------
 
 test('el área de captura es invisible, ancha y continua', () => {

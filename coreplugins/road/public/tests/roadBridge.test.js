@@ -41,7 +41,8 @@ const bridge = loadModule('roadBridge.js', {
   L, PluginsAPI, $, _: (s) => s,
   styleForSegment: style.styleForSegment,
   reasonLabel: style.reasonLabel,
-  hitStyle: style.hitStyle
+  hitStyle: style.hitStyle,
+  widthTickStyle: style.widthTickStyle
 });
 
 const map = {addLayer(){}, hasLayer(){ return true; }, removeLayer(){}};
@@ -65,10 +66,15 @@ function segment(index, overrides = {}){
   }, overrides);
 }
 
-// Cada tramo son dos capas: el trazo visible y su área de captura invisible, que es la interactiva
-// y la que lleva el `_roadSegment`. El color y el trazo discontinuo viven en la visible.
+// Cada tramo son dos capas —el trazo visible y su área de captura invisible e interactiva, que
+// lleva el `_roadSegment`— más la regla del ancho cuando tiene los dos bordes. El color y el
+// trazo discontinuo viven en la visible.
 function lines(group){
-  return group.getLayers().filter(l => !l._roadSegment);
+  return group.getLayers().filter(l => !l._roadSegment && !l._roadWidthTick);
+}
+
+function ticks(group){
+  return group.getLayers().filter(l => l._roadWidthTick);
 }
 
 let seq = 0;
@@ -99,6 +105,49 @@ test('cada polilínea nace con el color de su pendiente', () => {
   const applied = lines(group).map(l => l.options.color);
 
   assert.deepStrictEqual(applied, [palette.ok, palette.alert]);
+});
+
+// --- La regla del ancho ------------------------------------------------------------------------
+
+test('cada tramo con dos bordes dibuja su regla de borde a borde, bajo el eje', () => {
+  const {group} = publish();
+  const rules = ticks(group);
+
+  assert.strictEqual(rules.length, 3, 'una regla por tramo con ancho');
+  assert.ok(group.getLayers()[0]._roadWidthTick,
+    'las reglas van primero: pintadas bajo el eje, como en una regla graduada');
+  rules.forEach(rule => {
+    assert.strictEqual(rule.options.interactive, false, 'la regla no puede robar el click');
+    assert.strictEqual(rule.getLatLngs().length, 2, 'de borde a borde, sin puntos intermedios');
+  });
+});
+
+test('la regla une exactamente los dos puntos de borde del tramo', () => {
+  const seg = segment(0, {edge_left: [0.004, 0.001], edge_right: [-0.004, 0.001]});
+  const {group} = publish('task-1', [seg]);
+  const coords = ticks(group)[0].getLatLngs().map(ll => [ll.lng, ll.lat]);
+
+  assert.deepStrictEqual(coords, [seg.edge_left, seg.edge_right]);
+});
+
+test('sin uno de los bordes no hay regla: la ausencia es información', () => {
+  const {group} = publish('task-1', [
+    segment(0),
+    segment(1, {status: 'no_edge', width: null, offset_right: null,
+                right_reason: 'no_break', edge_right: null}),
+  ]);
+
+  assert.strictEqual(ticks(group).length, 1, 'solo el tramo con ambos bordes lleva regla');
+});
+
+test('recolorear por umbrales no toca las reglas', () => {
+  const {analysis, group} = publish();
+  const before = ticks(group).map(t => t.options.color);
+
+  bridge.applyThresholds(analysis.id, [1, 2]);
+
+  assert.deepStrictEqual(ticks(group).map(t => t.options.color), before,
+    'la regla habla de ancho: el semáforo de pendiente no debe alcanzarla');
 });
 
 // --- Recoloreado sin recálculo -----------------------------------------------------------------

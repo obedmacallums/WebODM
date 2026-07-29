@@ -39,7 +39,8 @@ const bridge = loadModule('roadBridge.js', {
   L, PluginsAPI, $, _: (s) => s,
   styleForSegment: style.styleForSegment,
   reasonLabel: style.reasonLabel,
-  hitStyle: style.hitStyle
+  hitStyle: style.hitStyle,
+  widthTickStyle: style.widthTickStyle
 });
 bridge.initBridge();
 

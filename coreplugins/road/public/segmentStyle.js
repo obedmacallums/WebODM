@@ -102,6 +102,27 @@ export function hitStyle(){
   };
 }
 
+// Regla del ancho: la transversal de borde a borde que materializa la medida sobre el mapa.
+//
+// Verde vivo, deliberadamente distinto del verde del semáforo (`#2e9e4f`): el semáforo habla de
+// pendiente y esta línea habla de ancho — compartir color mezclaría los dos mensajes. Se dibuja
+// por DEBAJO del tramo, así el eje coloreado la cruza por encima y el conjunto se lee como una
+// regla graduada: donde no hay regla, no hay ancho medido.
+//
+// En un tramo `inferred` la regla va discontinua, igual que su tramo: un ancho deducido de los
+// vecinos no puede dibujarse con el mismo trazo rotundo que uno medido.
+export function widthTickStyle(segment){
+  const inferred = segment && segment.status === 'inferred';
+  return {
+    color: '#1fe063',
+    weight: 3,
+    opacity: 0.9,
+    dashArray: inferred ? '5,4' : null,
+    lineCap: 'butt',
+    interactive: false
+  };
+}
+
 // Etiqueta legible del motivo por el que un lado no tiene borde (FR-021).
 //
 // Los tres motivos describen problemas distintos con soluciones distintas: retocar el umbral de
