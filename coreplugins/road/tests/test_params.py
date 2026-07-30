@@ -45,13 +45,24 @@ class ValidateParamsTest(RoadTestBase):
         self.assertEqual(params['coherence_window'], 0)
 
     def test_an_unknown_edge_mode_lists_the_valid_ones(self):
-        # Enum, no rango: el mensaje enumera los valores admitidos (`006` FR-004).
+        # Enum, no rango: el mensaje enumera los valores admitidos (`006` FR-004, `007` FR-004).
         params, err = sources.validate_params({'edge_mode': 'laser'}, DEM_RES)
 
         self.assertIsNone(params)
         self.assertIn('edge_mode', str(err))
         self.assertIn('break', str(err))
         self.assertIn('surface', str(err))
+        self.assertIn('segmentation', str(err))
+
+    def test_segmentation_mode_is_accepted_and_adds_no_parameters_of_its_own(self):
+        # `007/FR-015`: segmentación no tiene equivalente a `break_threshold` o
+        # `surface_tolerance`; se acepta el modo y el resto de parámetros quedan en sus defectos.
+        params, err = sources.validate_params({'edge_mode': 'segmentation'}, DEM_RES)
+
+        self.assertIsNone(err)
+        self.assertEqual(params['edge_mode'], 'segmentation')
+        self.assertEqual(params['break_threshold'], 15.0)
+        self.assertEqual(params['surface_tolerance'], 0.06)
 
     def test_surface_mode_is_accepted_and_persists_its_tolerance(self):
         params, err = sources.validate_params(

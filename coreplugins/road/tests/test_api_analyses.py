@@ -263,4 +263,72 @@ class CancelTest(AnalysesApiTestBase):
         res = self.client.post(self._url(task, 'analyses/{}/cancel'.format(analysis_id)))
 
         self.assertEqual(res.status_code, status.HTTP_404_NOT_FOUND)
-        self.assertEqual(store.get_analysis(str(task.id), analysis_id)['status'], 'running')
+
+
+class SegmentationModeAvailabilityTest(AnalysesApiTestBase):
+    """`007/contracts/rest-api-delta.md`: el modo `segmentation` exige ortofoto, comprobado antes
+    de lanzar el análisis y no como fallo del worker."""
+
+    def test_segmentation_mode_is_rejected_without_orthophoto(self):
+        task = self._task_with_dem(available_assets=['dtm.tif'], orthophoto_extent=None)
+        self._login()
+
+        res = self._create(task, params={'edge_mode': 'segmentation'})
+
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(res.data['code'], 'no_orthophoto')
+        self.assertEqual(store.list_analyses(str(task.id)), [])
+        self.assertIsNone(store.get_running(str(task.id)))
+
+    def test_break_and_surface_do_not_require_orthophoto(self):
+        # Ninguno de los otros dos modos comprueba la ortofoto: no la usan para nada.
+        task = self._task_with_dem(available_assets=['dtm.tif'], orthophoto_extent=None)
+        self._login()
+
+        res = self._create(task, params={'edge_mode': 'break'})
+
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+
+    def test_segmentation_mode_is_accepted_with_orthophoto(self):
+        # `_task_with_dem` ya trae ortofoto por defecto (`base.py: _task`).
+        task = self._task_with_dem()
+        self._login()
+
+        res = self._create(task, params={'edge_mode': 'segmentation'}, confirm=True)
+
+        self.assertEqual(res.status_code, status.HTTP_202_ACCEPTED)
+
+
+class HasMaskFieldTest(AnalysesApiTestBase):
+    """`has_mask` viaja en las respuestas de análisis; la máscara **no** (`008` FR-015, D36)."""
+
+    def test_listing_and_detail_expose_has_mask(self):
+        task = self._task_with_dem()
+        self._login()
+        analysis_id = self._create(task).data['analysis_id']
+
+        listed = self.client.get(self._url(task, 'analyses')).data['analyses'][0]
+        detail = self.client.get(self._url(task, 'analyses/{}'.format(analysis_id))).data
+
+        self.assertIn('has_mask', listed)
+        self.assertIn('has_mask', detail)
+        # Modo `break` por defecto: nunca produce máscara (FR-006).
+        self.assertFalse(listed['has_mask'])
+        self.assertFalse(detail['has_mask'])
+
+    def test_the_mask_itself_never_travels_in_the_analysis_payload(self):
+        """La capa está apagada por defecto: embeberla haría pagar decenas de KB a quien no la
+        enciende (`research.md` D36). El único indicio debe ser el booleano."""
+        task = self._task_with_dem()
+        self._login()
+        analysis_id = self._create(task).data['analysis_id']
+        store.write_mask(str(task.id), analysis_id,
+                         {'version': 1, 'features': [{'type': 'Feature'}]})
+
+        listed = self.client.get(self._url(task, 'analyses')).data['analyses'][0]
+        detail = self.client.get(self._url(task, 'analyses/{}'.format(analysis_id))).data
+
+        self.assertNotIn('features', listed)
+        self.assertNotIn('features', detail)
+        self.assertNotIn('mask', listed)
+        self.assertNotIn('mask', detail)

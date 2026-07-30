@@ -9,7 +9,8 @@ definición de un resultado que el frontend puede dibujar sin adivinar.
 from django.test import SimpleTestCase
 
 from .. import compute, sources
-from .base import AXIS_STATION_OFFSET, DEM_RES, RoadTestBase, axis_vertices
+from .base import (AXIS_STATION_OFFSET, DEM_EPSG, DEM_ORIGIN, DEM_RES, DEM_SIZE, ROAD_COL,
+                   RoadTestBase, axis_vertices, road_center_x)
 
 PARAMS = {
     'segment_length': 5.0,
@@ -533,3 +534,220 @@ class RunAnalysisPersistenceTest(RoadTestBase):
         self.assertEqual(analysis['status'], 'canceled')
         self.assertIsNone(store.read_segments(str(task.id), analysis_id))
         self.assertIsNone(store.get_running(str(task.id)))
+
+
+MASK_NODATA = 255
+
+
+def make_road_mask(path, half_width_left, half_width_right, size=DEM_SIZE, res=DEM_RES,
+                   origin=DEM_ORIGIN, epsg=DEM_EPSG, road_col=ROAD_COL, nodata_patch=None):
+    """Máscara `road`/`not_road` sintética, en el mismo grid que `make_road_dem` (`base.py`), para
+    los tests end-to-end del modo `segmentation` (`007` User Story 1). `nodata_patch` es
+    `(row0, row1, col0, col1)` en celdas, igual convención que `make_road_dem`, para simular un
+    hueco de cobertura de la ortofoto (`007` FR-007)."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    transform = from_origin(origin[0], origin[1], res, res)
+    cols = np.arange(size)
+    rows = np.arange(size)
+    col_grid, _row_grid = np.meshgrid(cols, rows)
+    x = origin[0] + (col_grid + 0.5) * res
+    d = x - road_center_x(origin, res, road_col)
+
+    on_road = np.where(d >= 0, d <= half_width_left, -d <= half_width_right)
+    data = on_road.astype(np.uint8)
+
+    if nodata_patch is not None:
+        r0, r1, c0, c1 = nodata_patch
+        data[r0:r1, c0:c1] = MASK_NODATA
+
+    with rasterio.open(path, 'w', driver='GTiff', height=size, width=size, count=1,
+                       dtype='uint8', crs='EPSG:{}'.format(epsg), transform=transform,
+                       nodata=MASK_NODATA) as dst:
+        dst.write(data, 1)
+
+
+class SegmentationModeTest(ComputeTestBase):
+    """`007` User Story 1: el modo `segmentation` mide donde `break`/`surface` no pueden, porque el
+    límite de la calzada es solo un cambio de clasificación en la ortofoto, sin ningún escalón de
+    elevación asociado. `segmentation.run_segmentation` se sustituye por un doble que devuelve una
+    máscara sintética ya escrita: estos tests no dependen de `geodeep` ni de `gdalwarp`
+    (ya cubiertos por `test_segmentation.py`), solo del despacho dentro de `compute.py`.
+    """
+
+    def _analyze_segmentation(self, mask_half_width_left, mask_half_width_right, dem_kwargs=None,
+                              params=None, mask_nodata_patch=None):
+        import tempfile
+        from unittest import mock
+
+        task = self._task_with_dem(dem_kwargs=dict(dem_kwargs or {}, talud=0.0))
+        dem_path = sources.original_path(task, 'dtm')
+
+        mask_path = tempfile.mktemp(suffix='.tif')
+        make_road_mask(mask_path, mask_half_width_left, mask_half_width_right,
+                       nodata_patch=mask_nodata_patch)
+        self.addCleanup(__import__('os').remove, mask_path)
+
+        merged_params = dict(PARAMS, edge_mode=sources.EDGE_MODE_SEGMENTATION, **(params or {}))
+
+        with mock.patch.object(compute.segmentation, 'run_segmentation', return_value=mask_path):
+            return compute.analyze(dem_path, axis_vertices(), merged_params,
+                                   orthophoto_path=dem_path)
+
+    def test_segmentation_mode_measures_where_break_and_surface_find_nothing(self):
+        # DEM plano (`talud=0.0`): `break` y `surface` dan `no_break` en los dos lados sobre este
+        # mismo DEM (ver `SummaryTest.test_width_aggregates_are_null_without_any_measured_segment`).
+        # La máscara sí tiene un límite claro, sin relieve asociado.
+        result = self._analyze_segmentation(mask_half_width_left=3.5, mask_half_width_right=3.5)
+        segments = result['segments']
+
+        for segment in segments:
+            self.assertEqual(segment['status'], 'measured', segment)
+            self.assertAlmostEqual(segment['width'], 7.0, delta=0.3)
+            self.assertAlmostEqual(segment['offset_left'], 3.5, delta=0.2)
+            self.assertAlmostEqual(segment['offset_right'], 3.5, delta=0.2)
+            assert_segment_invariants(self, segment)
+
+    def test_break_mode_finds_nothing_on_the_same_flat_dem(self):
+        # Control: el mismo DEM (sin máscara) en modo `break` no mide nada — confirma que la
+        # medida del test anterior viene de la segmentación, no de una casualidad del DEM.
+        task = self._task_with_dem(dem_kwargs={'talud': 0.0})
+        result = compute.analyze(sources.original_path(task, 'dtm'), axis_vertices(), dict(PARAMS))
+
+        self.assertEqual(result['summary']['measured_count'], 0)
+
+    def test_cross_slope_still_comes_from_elevation_between_the_edges(self):
+        # `007/FR-010`: el bombeo en modo segmentación se deriva del DEM entre los bordes hallados
+        # por la máscara, con el mismo criterio que el modo `break` — no de la máscara.
+        result = self._analyze_segmentation(mask_half_width_left=3.5, mask_half_width_right=3.5,
+                                            dem_kwargs={'cross_slope': 0.02})
+        for segment in result['segments']:
+            self.assertAlmostEqual(segment['cross_slope'], 2.0, delta=0.5)
+
+    def test_partial_mask_coverage_reports_no_orthophoto(self):
+        # `007/FR-007`, `research.md` D28 caso 2: la máscara no cubre el lado derecho del eje en
+        # absoluto (todas las columnas al oeste de `ROAD_COL`, `nodata` real, no solo "muy ancho").
+        result = self._analyze_segmentation(mask_half_width_left=3.5, mask_half_width_right=3.5,
+                                            mask_nodata_patch=(0, DEM_SIZE, 0, ROAD_COL))
+        segments = result['segments']
+
+        for segment in segments:
+            self.assertEqual(segment['status'], 'no_edge')
+            self.assertIsNone(segment['left_reason'])
+            self.assertEqual(segment['right_reason'], 'no_orthophoto')
+            self.assertAlmostEqual(segment['offset_left'], 3.5, delta=0.2)
+            self.assertIsNone(segment['offset_right'])
+            assert_segment_invariants(self, segment)
+
+    def test_break_threshold_and_surface_tolerance_are_ignored_in_segmentation_mode(self):
+        # `007/FR-015`: no tienen efecto en este modo, aunque se envíen.
+        result = self._analyze_segmentation(
+            mask_half_width_left=3.5, mask_half_width_right=3.5,
+            params={'break_threshold': 0.001, 'surface_tolerance': 0.001})
+
+        for segment in result['segments']:
+            self.assertEqual(segment['status'], 'measured')
+            self.assertAlmostEqual(segment['width'], 7.0, delta=0.3)
+
+    def test_missing_orthophoto_path_fails_clearly_instead_of_crashing(self):
+        task = self._task_with_dem(dem_kwargs={'talud': 0.0})
+        with self.assertRaises(RuntimeError) as ctx:
+            compute.analyze(sources.original_path(task, 'dtm'), axis_vertices(),
+                            dict(PARAMS, edge_mode=sources.EDGE_MODE_SEGMENTATION))
+        self.assertIn('orthophoto_path', str(ctx.exception))
+
+    def test_coherence_can_infer_a_segmentation_edge_too(self):
+        # `007` User Story 3 / FR-011, FR-012: la coherencia (`006`) no distingue de qué modo
+        # salió un borde medido — un tramo sin cobertura de ortofoto en un lado, rodeado de tramos
+        # con ese lado medido, recibe un valor inferido igual que en `break`/`surface`.
+        # Filas 240-260 ~ tramo índice 10 (progresivas 50-55 m de un eje de 100 m en 20 tramos de
+        # 5 m): sin cobertura de máscara en el lado derecho, solo ahí.
+        result = self._analyze_segmentation(
+            mask_half_width_left=3.5, mask_half_width_right=3.5,
+            mask_nodata_patch=(240, 260, 0, ROAD_COL),
+            params={'coherence_window': 2})
+        segments = result['segments']
+
+        target = segments[10]
+        self.assertEqual(target['status'], 'inferred')
+        self.assertEqual(target['right_edge_source'], 'inferred')
+        self.assertEqual(target['right_reason'], 'no_orthophoto')  # el motivo original se conserva
+        self.assertAlmostEqual(target['offset_right'], 3.5, delta=0.3)
+
+        for i in (5, 15):   # vecinos lejos de la reparación: sin tocar
+            self.assertEqual(segments[i]['status'], 'measured')
+            self.assertEqual(segments[i]['right_edge_source'], 'measured')
+
+    def test_a_params_dict_without_edge_mode_still_behaves_like_break(self):
+        # `007` User Story 4: un análisis anterior a esta feature —o a `006`— tiene un documento de
+        # `params` sin la clave `edge_mode` en absoluto (no solo `None`). Recalcularlo no puede
+        # comportarse distinto de `break`: el despacho de `_section_result` cae en el `else` para
+        # cualquier valor que no sea `'surface'` ni `'segmentation'`, así que una clave ausente ya
+        # se comporta como `break` sin que haga falta ningún caso especial.
+        task = self._task_with_dem()   # talud por defecto: break SÍ mide aquí
+        params_without_edge_mode = {k: v for k, v in PARAMS.items() if k != 'edge_mode'}
+        self.assertNotIn('edge_mode', params_without_edge_mode)
+
+        result = compute.analyze(sources.original_path(task, 'dtm'), axis_vertices(),
+                                 params_without_edge_mode)
+
+        for segment in result['segments']:
+            self.assertEqual(segment['status'], 'measured')
+            self.assertAlmostEqual(segment['width'], 8.0, places=6)
+
+
+class SegmentationFailureTest(RoadTestBase):
+    """`007` User Story 2, `research.md` D28 caso 1: un fallo global de la etapa de segmentación
+    —librería ausente, sin red para el modelo, `gdalwarp` ausente— hace fallar el análisis
+    **completo**, con el mismo mecanismo que cualquier otra excepción de `run_analysis`. Ningún
+    tramo se produce, y `break`/`surface` de la misma tarea no se ven afectados."""
+
+    def test_run_analysis_marks_the_whole_analysis_as_failed_without_any_segment(self):
+        from unittest import mock
+
+        from .. import compute, sources, store
+
+        task = self._task_with_dem(dem_kwargs={'talud': 0.0})
+        dem_path = sources.original_path(task, 'dtm')
+        analysis_id = 'analysis-segmentation-failure'
+        params = dict(PARAMS, edge_mode=sources.EDGE_MODE_SEGMENTATION)
+        store.upsert_analysis(str(task.id), {
+            'id': analysis_id, 'name': 'Camino', 'status': 'running', 'progress': 0.0,
+            'model': 'dtm', 'variant': 'original', 'params': params,
+            'axis': {'kind': 'annotation', 'ref': 'a1', 'vertices': axis_vertices(),
+                     'plan_length': 100.0},
+        })
+        store.acquire_running(str(task.id), analysis_id)
+
+        with mock.patch.object(compute.segmentation, 'run_segmentation',
+                               side_effect=RuntimeError('GeoDeep library is missing')):
+            compute.run_analysis(str(task.id), analysis_id, dem_path, axis_vertices(), params,
+                                 orthophoto_path=dem_path)
+
+        analysis = store.get_analysis(str(task.id), analysis_id)
+        self.assertEqual(analysis['status'], 'failed')
+        self.assertIn('GeoDeep', analysis['error'])
+        self.assertIsNone(store.get_running(str(task.id)))
+        self.assertIsNone(store.read_segments(str(task.id), analysis_id))
+
+    def test_break_mode_is_unaffected_by_geodeep_being_unavailable(self):
+        # El resto de la tarea sigue funcionando: `break` nunca llama a `segmentation`.
+        from .. import compute, sources, store
+
+        task = self._task_with_dem(dem_kwargs={'talud': 0.5})
+        analysis_id = 'analysis-break-control'
+        store.upsert_analysis(str(task.id), {
+            'id': analysis_id, 'name': 'Camino', 'status': 'running', 'progress': 0.0,
+            'model': 'dtm', 'variant': 'original', 'params': dict(PARAMS),
+            'axis': {'kind': 'annotation', 'ref': 'a1', 'vertices': axis_vertices(),
+                     'plan_length': 100.0},
+        })
+        store.acquire_running(str(task.id), analysis_id)
+
+        compute.run_analysis(str(task.id), analysis_id, sources.original_path(task, 'dtm'),
+                             axis_vertices(), dict(PARAMS))
+
+        analysis = store.get_analysis(str(task.id), analysis_id)
+        self.assertEqual(analysis['status'], 'completed')

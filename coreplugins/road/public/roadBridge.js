@@ -3,6 +3,7 @@ import PluginsAPI from 'webodm/classes/plugins/API';
 import { _ } from 'webodm/classes/gettext';
 import { styleForSegment, reasonLabel, haloStyleFor, hitStyle, widthTickStyle } from './segmentStyle';
 import { widthTickPoints } from './widthTick';
+import { buildMaskLayer } from './maskLayer';
 
 // Diálogo con el bus de anotaciones del core (`contracts/consumed-contracts.md` §3).
 //
@@ -243,6 +244,9 @@ function publishAnalysis(map, task, analysis, segments, opts = {}){
 
 function unpublishAnalysis(group){
   const meta = registry.get(group);
+  // La máscara sobreviviría al análisis que la originó y quedaría flotando sobre el mapa,
+  // señalando una medición que ya no está — mismo problema que el contorno de abajo.
+  if (meta && meta.analysisId) unpublishMask(meta.analysisId);
   registry.delete(group);
   // El contorno sobreviviría al grupo que lo originó y quedaría flotando sobre el mapa señalando
   // un tramo que ya no existe.
@@ -251,6 +255,41 @@ function unpublishAnalysis(group){
   const map = (meta && meta.map) || group._map;
   if (map && map.hasLayer(group)) map.removeLayer(group);
 }
+
+// --- Capa de máscara del modelo (`008` US1, `research.md` D39) -------------------------------
+//
+// Vive **fuera** del `L.FeatureGroup` del análisis a propósito. Ese grupo está registrado en
+// `PluginsAPI.Map.addAnnotation`, así que el core también lo gestiona: meter la máscara dentro la
+// haría aparecer y desaparecer con el análisis entero, y encender la capa tocaría una estructura
+// compartida. Separadas, las dos cosas son ortogonales.
+
+const maskLayers = new Map(); // analysisId -> L.GeoJSON
+
+function publishMask(map, analysisId, features){
+  unpublishMask(analysisId);
+  const layer = buildMaskLayer(features);
+  if (!layer) return null;
+  layer.addTo(map);
+  // Por debajo de todo lo del análisis: las reglas de ancho ya se dibujan bajo el eje a propósito
+  // (`segmentStyle.js`), y la máscara es un relleno de superficie, así que va aún más abajo. Si
+  // quedara encima taparía la lectura del eje y de las reglas (`FR-013`).
+  if (layer.bringToBack) layer.bringToBack();
+  maskLayers.set(analysisId, layer);
+  return layer;
+}
+
+function unpublishMask(analysisId){
+  const layer = maskLayers.get(analysisId);
+  if (!layer) return;
+  maskLayers.delete(analysisId);
+  const map = layer._map;
+  if (map && map.hasLayer(layer)) map.removeLayer(layer);
+}
+
+function maskLayerFor(analysisId){
+  return maskLayers.get(analysisId) || null;
+}
+
 
 function isOwned(group){
   return registry.has(group);
@@ -380,6 +419,9 @@ export default {
   setAnnotationAddedNotifier,
   publishAnalysis,
   unpublishAnalysis,
+  publishMask,
+  unpublishMask,
+  maskLayerFor,
   renameAnalysis,
   applyThresholds,
   applyWidthThresholds,

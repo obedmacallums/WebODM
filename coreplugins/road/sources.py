@@ -22,11 +22,14 @@ VARIANT_REALIGNED = 'realigned'
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 
-# Criterios de detección de borde (`006` FR-001). `break` es el original de D3 y el defecto:
-# debe producir resultados idénticos a los de antes de existir esta elección (FR-002).
+# Criterios de detección de borde (`006` FR-001, `007` FR-001). `break` es el original de D3 y el
+# defecto: debe producir resultados idénticos a los de antes de existir esta elección (FR-002).
+# `segmentation` (`007`) no añade parámetros propios (`007/FR-015`): clasifica la ortofoto en vez
+# de medir el modelo de elevación, y no necesita ningún dial nuevo para hacerlo.
 EDGE_MODE_BREAK = 'break'
 EDGE_MODE_SURFACE = 'surface'
-EDGE_MODES = (EDGE_MODE_BREAK, EDGE_MODE_SURFACE)
+EDGE_MODE_SEGMENTATION = 'segmentation'
+EDGE_MODES = (EDGE_MODE_BREAK, EDGE_MODE_SURFACE, EDGE_MODE_SEGMENTATION)
 
 # Cómo se resume el ancho cuando el tramo se mide en varias transversales. `median` es el defecto
 # y elige una sección **real** —la de ancho mediano— reportándola entera, así que los bordes que

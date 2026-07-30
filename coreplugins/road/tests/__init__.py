@@ -28,3 +28,8 @@ from .test_upload import *            # noqa: F401,F403
 from .test_variants import *          # noqa: F401,F403
 from .test_export import *            # noqa: F401,F403
 from .test_frontend import *          # noqa: F401,F403
+from .test_segmentation_edges import *  # noqa: F401,F403
+from .test_segmentation import *      # noqa: F401,F403
+from .test_mask_vectorize import *    # noqa: F401,F403
+from .test_mask_store import *       # noqa: F401,F403
+from .test_api_mask import *         # noqa: F401,F403

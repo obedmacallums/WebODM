@@ -1,7 +1,7 @@
 from app.plugins import PluginBase
 from app.plugins import MountPoint
 
-from .api import (AnalysisCancel, AnalysisDetail, AnalysisEstimate, AnalysisExport, AnalysisList,
+from .api import (AnalysisCancel, AnalysisDetail, AnalysisEstimate, AnalysisExport, AnalysisList, AnalysisMask,
                   Capabilities)
 from . import signals  # noqa: F401 - registra el receptor de task_removed (borrado en cascada)
 
@@ -28,6 +28,11 @@ class Plugin(PluginBase):
                        AnalysisCancel.as_view()),
             MountPoint('task/(?P<pk>[^/.]+)/analyses/(?P<analysis_id>[^/.]+)/export$',
                        AnalysisExport.as_view()),
+            # La máscara del modelo (`008`). Como el resto de literales, va **antes** del patrón
+            # genérico de `<analysis_id>`: sin `$` los MountPoint resuelven por prefijo y el
+            # genérico se tragaría esta ruta.
+            MountPoint('task/(?P<pk>[^/.]+)/analyses/(?P<analysis_id>[^/.]+)/mask$',
+                       AnalysisMask.as_view()),
             MountPoint('task/(?P<pk>[^/.]+)/analyses/(?P<analysis_id>[^/.]+)$',
                        AnalysisDetail.as_view()),
         ]

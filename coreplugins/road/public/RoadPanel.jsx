@@ -4,6 +4,7 @@ import './RoadPanel.scss';
 import ErrorMessage from 'webodm/components/ErrorMessage';
 import { _ } from 'webodm/classes/gettext';
 import bridge from './roadBridge';
+import { maskState, maskMessage } from './maskLayer';
 import { initialParams, publishAction, axisSelection, applyPreset, MINING_PRESET }
   from './panelLogic';
 import { colors } from './segmentStyle';
@@ -30,7 +31,11 @@ const PARAM_FIELDS = [
 
 const EDGE_MODE_LABELS = {
   break: () => _("Quiebre de pendiente — talud o cuneta (camino)"),
-  surface: () => _("Separación de la calzada — bordillo (calle)")
+  surface: () => _("Separación de la calzada — bordillo (calle)"),
+  // `007`: sin parámetros propios (a diferencia de los otros dos), así que no hay entrada nueva
+  // que añadir a PARAM_FIELDS — el mecanismo `onlyMode` ya oculta break_threshold y
+  // surface_tolerance en cualquier modo que no sea el suyo.
+  segmentation: () => _("Segmentación de la ortofoto — sin relieve en el borde (IA, experimental)")
 };
 
 // Cómo se resume el ancho cuando el tramo se mide en varias transversales. Solo tiene efecto con
@@ -64,6 +69,10 @@ export default class RoadPanel extends React.Component {
       axisSource: 'annotation',
       uploadFile: null,
       pendingConfirm: null,
+      // La capa de máscara arranca apagada en cada análisis (`008` FR-014): aparecer sola taparía
+      // la ortofoto sin que nadie lo haya pedido.
+      masksShown: {},
+      maskLoading: {},
       selectedAxis: "",
       selectedModel: "",
       selectedVariant: "original"
@@ -73,6 +82,7 @@ export default class RoadPanel extends React.Component {
     this._thresholdSaves = {}; // analysisId -> timeout del PATCH diferido
     this._widthThresholdSaves = {};   // lo mismo para el semáforo del ancho
     this._published = {};      // analysisId -> L.FeatureGroup, o `true` si el GET está en vuelo
+    this._masks = {};          // analysisId -> documento de máscara, o `null` si no hay guardada
     this._paramsSeeded = false;   // el formulario solo se siembra una vez: después manda el usuario
     this._analysesLoaded = false; // la siembra necesita capabilities Y la primera lista de análisis
     this._axisRefresh = null;     // timeout del refresco de ejes agrupado
@@ -632,6 +642,79 @@ export default class RoadPanel extends React.Component {
     </div>);
   }
 
+  // --- Capa de máscara del modelo (`008`) ------------------------------------------------
+  //
+  // Existe para que el usuario pueda **auditar** un ancho del que ya sabemos que puede desviarse
+  // metros: en la calle de referencia el modelo marcó como calzada un descampado contiguo. Sin
+  // esta capa esa desviación solo se descubre rescatando ficheros temporales a mano.
+
+  handleToggleMask = (analysis) => {
+    const shown = this.state.masksShown[analysis.id];
+    if (shown){
+      bridge.unpublishMask(analysis.id);
+      this.setState({masksShown: Object.assign({}, this.state.masksShown, {[analysis.id]: false})});
+      return;
+    }
+
+    const cached = this._masks[analysis.id];
+    if (cached !== undefined){
+      this.showMask(analysis, cached);
+      return;
+    }
+
+    // Se pide **solo al encenderla** (`research.md` D36): la capa está apagada por defecto, así
+    // que quien no la usa no debe pagar sus decenas de KB en cada apertura del panel.
+    this.setState({maskLoading: Object.assign({}, this.state.maskLoading, {[analysis.id]: true})});
+    $.getJSON(`${this.apiBase()}/analyses/${analysis.id}/mask`)
+      .done(res => {
+        this._masks[analysis.id] = res;
+        this.showMask(analysis, res);
+      })
+      .fail(() => {
+        // `null` es el estado «no hay máscara guardada», distinto de una con `features: []`.
+        this._masks[analysis.id] = null;
+        this.showMask(analysis, null);
+      })
+      .always(() => {
+        this.setState({
+          maskLoading: Object.assign({}, this.state.maskLoading, {[analysis.id]: false})
+        });
+      });
+  }
+
+  // `maskDoc` y no `document`: en el navegador ese nombre es el DOM global, y sombrearlo dentro
+  // de un componente es pedir un fallo desconcertante más adelante.
+  showMask = (analysis, maskDoc) => {
+    const group = this._published[analysis.id];
+    const map = group && group._map ? group._map : (this.props.map || null);
+    const features = maskDoc ? (maskDoc.features || []) : [];
+    if (map && features.length) bridge.publishMask(map, analysis.id, features);
+    this.setState({masksShown: Object.assign({}, this.state.masksShown, {[analysis.id]: true})});
+  }
+
+  renderMaskControl(analysis){
+    // El control solo aparece si hay máscara guardada (`FR-015`). Los modos `break`/`surface` no
+    // producen ninguna, y los análisis anteriores a `008` tampoco.
+    if (!analysis.has_mask) return null;
+
+    const shown = !!this.state.masksShown[analysis.id];
+    const loading = !!this.state.maskLoading[analysis.id];
+    const maskDoc = this._masks[analysis.id];
+    const state = shown ? maskState(maskDoc) : null;
+
+    return (<div className="road-mask">
+      <label>
+        <input type="checkbox" checked={shown} disabled={loading}
+               onChange={() => this.handleToggleMask(analysis)} />
+        {_("Mostrar lo que detectó el modelo")}
+      </label>
+      {shown && !loading ?
+        <div className="road-mask-note">
+          {maskMessage(state, maskDoc ? maskDoc.resolution_m : null)}
+        </div> : null}
+    </div>);
+  }
+
   renderAnalysis(analysis){
     const summary = analysis.summary || {};
     const isRunning = analysis.status === 'running';
@@ -669,6 +752,7 @@ export default class RoadPanel extends React.Component {
               {_("pendiente")} {(summary.min_grade || 0).toFixed(1)}% … {(summary.max_grade || 0).toFixed(1)}%
             </span>
           </div>
+          {this.renderMaskControl(analysis)}
           <div className="road-downloads">
             {_("Descargar:")}
             <a onClick={() => this.handleDownload(analysis, 'csv')}>CSV</a>

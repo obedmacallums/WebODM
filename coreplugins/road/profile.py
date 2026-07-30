@@ -25,6 +25,10 @@ import numpy as np
 NO_BREAK = 'no_break'          # se recorrió todo el semiancho sin encontrar quiebre
 NO_DATA = 'no_data'            # el DEM se quedó sin dato antes de completar el recorrido
 BREAK_AT_AXIS = 'break_at_axis'  # el terreno se rompe sobre el propio eje: no hay calzada que medir
+# Exclusivo del modo `segmentation` (`007` FR-007, `research.md` D29): la etapa de segmentación se
+# completó, pero la ortofoto no cubre la muestra de este tramo. Distinto de NO_DATA a propósito: la
+# fuente que falta es la ortofoto, no el modelo de elevación, y confundirlas mentiría sobre la causa.
+NO_ORTHOPHOTO = 'no_orthophoto'
 
 
 def _clean(xs, ys):
@@ -392,3 +396,95 @@ def cross_slope(distances, elevations, left_index, right_index):
     if fit is None:
         return None
     return fit[0] * 100.0
+
+
+# --- Criterio de segmentación (`007` FR-005..FR-007, `research.md` D30) -------------------
+#
+# Donde `detect_edges` busca lo afilado y `detect_edges_surface` lo alto, esto busca lo que la
+# ortofoto clasifica como calzada: `mask_values` es la máscara `road`/`not_road` de `geodeep`
+# (`research.md` D25), muestreada en los mismos offsets que la elevación. `1.0` = calzada,
+# `0.0` = no-calzada, `None` = sin cobertura de la ortofoto en ese punto (`NO_ORTHOPHOTO`).
+
+# Umbral de la máscara: `>= 0.5` cuenta como calzada. La máscara de `geodeep` ya es binaria
+# (0.0/1.0) tras el muestreo por vecino más próximo, pero dejar un umbral en vez de comparar
+# igualdad exacta de floats no cuesta nada y tolera un remuestreo futuro con probabilidades.
+MASK_ROAD_THRESHOLD = 0.5
+
+
+def _scan_side_segmentation(distances, mask_values, center, direction, min_consecutive):
+    """Recorre un lado del perfil desde el eje hacia afuera buscando la racha sostenida de
+    no-calzada.
+
+    Mismo contrato de salida que `_scan_side_surface`. El borde es la **última muestra
+    conforme** —la última clasificada como calzada antes de la racha sostenida de no-calzada—, no
+    la primera muestra ya fuera: a diferencia del quiebre de pendiente (`_scan_side`), aquí no hay
+    ninguna zona de transición que afinar, así que el punto que de verdad describe "hasta aquí es
+    calzada" es el límite real, no el primer paso ya fuera de ella. Mismo criterio que
+    `_scan_side_surface` usa para el pie del quiebre.
+
+    Un hueco de cobertura (`None`) en el camino es `NO_ORTHOPHOTO`, no `NO_DATA`: la fuente que
+    falta es la ortofoto, no el modelo de elevación (`research.md` D29).
+    """
+    n = len(distances)
+    run_start = None
+    run_length = 0
+    i = center + direction
+
+    while 0 <= i < n:
+        m = mask_values[i]
+        if m is None:
+            return None, None, NO_ORTHOPHOTO
+        if m < MASK_ROAD_THRESHOLD:
+            if run_length == 0:
+                run_start = i
+            run_length += 1
+            if run_length >= min_consecutive:
+                if run_start == center + direction:
+                    return None, None, BREAK_AT_AXIS
+                edge = run_start - direction
+                return distances[edge], edge, None
+        else:
+            run_length = 0
+            run_start = None
+        i += direction
+
+    return None, None, NO_BREAK
+
+
+def detect_edges_segmentation(distances, mask_values, min_consecutive):
+    """Bordes de calzada a ambos lados del eje, por clasificación de la ortofoto (`007`
+    FR-005..FR-007).
+
+    Mismo contrato de entrada que `detect_edges`, cambiando `elevations` por `mask_values` (la
+    máscara de segmentación muestreada en los mismos offsets). Mismo contrato de salida —`left` /
+    `right`, cada uno con `offset`, `index` y `reason`— con un cuarto motivo posible,
+    `NO_ORTHOPHOTO`, además de los tres ya existentes.
+    """
+    if len(distances) != len(mask_values):
+        raise ValueError('distances y mask_values deben tener la misma longitud')
+
+    no_side = {'offset': None, 'index': None, 'reason': NO_ORTHOPHOTO}
+    if len(distances) == 0:
+        return {'left': dict(no_side), 'right': dict(no_side)}
+
+    center = _center_index(distances)
+    if mask_values[center] is None:
+        return {'left': dict(no_side), 'right': dict(no_side)}
+
+    left_offset, left_index, left_reason = _scan_side_segmentation(
+        distances, mask_values, center, +1, min_consecutive)
+    right_offset, right_index, right_reason = _scan_side_segmentation(
+        distances, mask_values, center, -1, min_consecutive)
+
+    return {
+        'left': {
+            'offset': None if left_offset is None else abs(left_offset),
+            'index': left_index,
+            'reason': left_reason,
+        },
+        'right': {
+            'offset': None if right_offset is None else abs(right_offset),
+            'index': right_index,
+            'reason': right_reason,
+        },
+    }

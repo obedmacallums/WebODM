@@ -13,6 +13,7 @@ respuesta: mezclar las dos escalas a mitad del pipeline es la vía más rápida 
 grados.
 """
 
+import contextlib
 import math
 import time
 
@@ -22,11 +23,17 @@ from rasterio.windows import Window
 
 from app.geoutils import get_rasterio_to_meters_factor
 
-from . import coherence, geometry, profile
+from . import coherence, geometry, profile, segmentation
 
 # Techo de píxeles por lectura. 4 M en float32 son 16 MB: el DEM de un vuelo grande no cabe
 # cómodamente en la memoria del worker, y el eje solo cubre una franja estrecha de él.
 MAX_WINDOW_PIXELS = 4_000_000
+
+# Fracción del progreso total reservada a la etapa de segmentación en modo `segmentation`
+# (`007/FR-009`, `research.md` D27): sin esto, el usuario ve el progreso congelado mientras el
+# modelo de IA corre, y solo salta al terminar. El resto del progreso —el bucle de bloques que ya
+# existía— ocupa el resto. No aplica a `break` ni `surface`.
+SEGMENTATION_PROGRESS_SHARE = 0.4
 
 # Tasa de muestras por segundo para la estimación previa (`research.md` D11).
 #
@@ -140,27 +147,33 @@ def _to_list(values):
     return [None if math.isnan(v) else float(v) for v in values]
 
 
-def _section_result(offsets, cross_values, params, unit_factor):
+def _section_result(offsets, cross_values, params, unit_factor, mask_values=None):
     """Bordes y ancho de **una** transversal, en metros."""
     cross_list = _to_list(cross_values)
 
-    # El suavizado alimenta SOLO la detección: `cross_slope` y las cotas se siguen midiendo
-    # sobre el dato crudo. `smooth_window` va en metros y los offsets en unidad nativa, de ahí
-    # la conversión; con la ventana a 0 (el defecto) `median_kernel` devuelve 1 y `detect_list`
-    # es el propio perfil — el comportamiento de siempre, muestra a muestra.
+    # El suavizado alimenta SOLO la detección basada en elevación: `cross_slope` y las cotas se
+    # siguen midiendo sobre el dato crudo. `smooth_window` va en metros y los offsets en unidad
+    # nativa, de ahí la conversión; con la ventana a 0 (el defecto) `median_kernel` devuelve 1 y
+    # `detect_list` es el propio perfil — el comportamiento de siempre, muestra a muestra.
     detect_list = cross_list
     window = params.get('smooth_window') or 0.0
     if window > 0 and len(offsets) > 1:
         kernel = profile.median_kernel(window / unit_factor, offsets[1] - offsets[0])
         detect_list = profile.median_smooth(cross_list, kernel)
 
-    if params.get('edge_mode') == 'surface':
+    edge_mode = params.get('edge_mode')
+    if edge_mode == 'surface':
         # La tolerancia es vertical y no se convierte; la semilla es horizontal y va en la unidad
         # de `offsets`, que aquí es la nativa del CRS (`006` D18).
         edges = profile.detect_edges_surface(
             offsets, detect_list, params['surface_tolerance'],
             params['min_consecutive_samples'],
             seed_half_width=profile.SURFACE_SEED_HALF_WIDTH / unit_factor)
+    elif edge_mode == 'segmentation':
+        # `007/FR-015b`: `smooth_window` no interviene aquí — la máscara es una clasificación
+        # binaria, no una señal continua que suavizar. Se usa `mask_values` crudo, no `detect_list`.
+        edges = profile.detect_edges_segmentation(
+            offsets, mask_values, params['min_consecutive_samples'])
     else:
         edges = profile.detect_edges(offsets, detect_list, params['break_threshold'],
                                      params['min_consecutive_samples'])
@@ -172,11 +185,13 @@ def _section_result(offsets, cross_values, params, unit_factor):
 
     if not measured:
         cross = None
-    elif params.get('edge_mode') == 'surface':
+    elif edge_mode == 'surface':
         # D19: el bombeo ES la pendiente de la referencia ajustada, medida exactamente sobre las
         # muestras que el criterio consideró calzada.
         cross = edges['reference']['cross_slope']
     else:
+        # `007/FR-010`: en modo segmentación la pendiente transversal se deriva igual que en modo
+        # `break` — de las muestras de elevación entre los bordes hallados, no de la máscara.
         cross = profile.cross_slope(offsets, cross_list, left['index'], right['index'])
 
     return {
@@ -211,17 +226,26 @@ def _representative(sections):
     return measured[(len(measured) - 1) // 2]
 
 
-def _segment_metrics(segment, offsets, params, unit_factor, axis_values, cross_values):
+def _segment_metrics(segment, offsets, params, unit_factor, axis_values, cross_values,
+                     mask_values=None):
     """Métricas de un tramo a partir de sus muestras ya leídas.
 
     `cross_values` trae **una fila por transversal** del tramo (`data-model.md` §6): una sola con
-    el espaciado apagado, que es el defecto y el comportamiento de siempre.
+    el espaciado apagado, que es el defecto y el comportamiento de siempre. `mask_values`, con la
+    misma forma, solo se pasa en modo `segmentation` (`007/FR-005`); en los otros dos modos es
+    `None` y cada sección lo recibe así.
     """
     stations = segment['_stations']
     fit = profile.fit_grade(stations - stations[0], _to_list(axis_values))
 
     rows = cross_values.reshape(len(segment['_section_midpoints']), len(offsets))
-    sections = [_section_result(offsets, row, params, unit_factor) for row in rows]
+    if mask_values is not None:
+        mask_rows = [_to_list(r) for r in mask_values.reshape(
+            len(segment['_section_midpoints']), len(offsets))]
+    else:
+        mask_rows = [None] * len(rows)
+    sections = [_section_result(offsets, row, params, unit_factor, mask_values=mrow)
+               for row, mrow in zip(rows, mask_rows)]
     pick = _representative(sections)
     chosen = sections[pick]
     midpoint = segment['_section_midpoints'][pick]
@@ -334,11 +358,17 @@ def _edge_point(midpoint, normal, offsets, index):
     return (mx + d * nx, my + d * ny)
 
 
-def analyze(dem_path, vertices, params, progress_callback=None, should_cancel=None):
+def analyze(dem_path, vertices, params, progress_callback=None, should_cancel=None,
+           orthophoto_path=None):
     """Ejecuta el análisis completo y devuelve `{'segments': [...], 'summary': {...}}`.
 
     No persiste nada ni conoce la tarea: eso es cosa de `run_analysis`. Separarlo es lo que permite
     ejercitar el pipeline entero en un test sin montar el andamiaje del worker.
+
+    `orthophoto_path` solo se usa en modo `segmentation` (`007/FR-005`); se ignora en los otros dos
+    modos aunque se pase. Un fallo de la etapa de segmentación —librería ausente, `gdalwarp`
+    ausente, sin red para el modelo— se propaga como cualquier otra excepción de este pipeline:
+    `run_analysis` ya la captura y marca el análisis como `failed` (`research.md` D28, caso 1).
     """
     started = time.time()
 
@@ -352,7 +382,12 @@ def analyze(dem_path, vertices, params, progress_callback=None, should_cancel=No
         except Exception:
             return False
 
-    with rasterio.open(dem_path) as ds:
+    segmentation_mode = params.get('edge_mode') == 'segmentation'
+    if segmentation_mode and not orthophoto_path:
+        raise RuntimeError('orthophoto_path is required for segmentation mode')
+
+    with contextlib.ExitStack() as stack:
+        ds = stack.enter_context(rasterio.open(dem_path))
         unit_factor = get_rasterio_to_meters_factor(ds)
         resolution = min(abs(ds.res[0]), abs(ds.res[1]))
 
@@ -377,6 +412,27 @@ def analyze(dem_path, vertices, params, progress_callback=None, should_cancel=No
                 for station in geometry.section_stations(segment['station_start'],
                                                          segment['station_end'], spacing_native)]
 
+        # Fase de segmentación (`007/FR-005`, `FR-008`; `research.md` D25, D26, D27): corre una
+        # sola vez para todo el eje, antes del bucle de bloques, y no cuando el modo es otro.
+        mask_ds = None
+        mask_document = None
+        if segmentation_mode:
+            def _segmentation_progress(text, perc):
+                if progress_callback is not None:
+                    progress_callback(text, min(max(perc, 0.0), 100.0) * SEGMENTATION_PROGRESS_SHARE)
+
+            with rasterio.open(orthophoto_path) as ortho_ds:
+                ortho_crs = ortho_ds.crs
+            corridor = segmentation.build_corridor(vertices, params['search_half_width'],
+                                                   ortho_crs)
+            mask_path = segmentation.run_segmentation(
+                orthophoto_path, corridor, progress_callback=_segmentation_progress)
+            mask_ds = stack.enter_context(rasterio.open(mask_path))
+            # Vectorizado del ráster que se acaba de escribir (`008` FR-001, `research.md` D34):
+            # el mismo fichero que el bucle de abajo muestrea, sin una segunda pasada del modelo.
+            # Barato frente a la inferencia: 0,036 s contra 13,49 s en el corredor de 293 m.
+            mask_document = segmentation.vectorize_mask(mask_path)
+
         block = block_size_for(seg_len_native, half_width_native, resolution)
         total_samples = 0
         results = []
@@ -388,18 +444,25 @@ def analyze(dem_path, vertices, params, progress_callback=None, should_cancel=No
         window = int(params.get('coherence_window') or 0)
         retained = [] if window > 0 else None
 
+        # `007/FR-009`: en modo segmentación el bucle de bloques ocupa el tramo de progreso que
+        # deja libre la segmentación, no el 0-100 % completo. En los otros dos modos es igual que
+        # siempre: `base_progress = 0`, `loop_share = 1.0`.
+        base_progress = SEGMENTATION_PROGRESS_SHARE * 100.0 if segmentation_mode else 0.0
+        loop_share = (1.0 - SEGMENTATION_PROGRESS_SHARE) if segmentation_mode else 1.0
+
         index = 0
         while index < len(segments):
             if canceled():
                 raise Canceled()
 
             size = min(block, len(segments) - index)
-            chunk, size = _read_block(ds, segments, index, size, offsets, cum, coords)
+            chunk, size = _read_block(ds, segments, index, size, offsets, cum, coords,
+                                      mask_ds=mask_ds)
             total_samples += sum(c['axis'].size + c['cross'].size for c in chunk)
 
             for segment, sampled in zip(segments[index:index + size], chunk):
                 metrics = _segment_metrics(segment, offsets, params, unit_factor,
-                                           sampled['axis'], sampled['cross'])
+                                           sampled['axis'], sampled['cross'], sampled.get('mask'))
                 results.append(_build_segment(segment, metrics, offsets, unit_factor))
                 if retained is not None:
                     # El perfil y el punto de la sección representativa, no los del tramo: la
@@ -413,7 +476,8 @@ def analyze(dem_path, vertices, params, progress_callback=None, should_cancel=No
 
             index += size
             if progress_callback is not None:
-                progress_callback('Analizando el camino', 100.0 * index / len(segments))
+                progress_callback('Analizando el camino',
+                                  base_progress + loop_share * 100.0 * index / len(segments))
 
         # La coherencia va antes de la reproyección: mueve puntos de borde, y reproyectar dos
         # veces es justo el coste que la pasada única de abajo evita (D22).
@@ -426,7 +490,9 @@ def analyze(dem_path, vertices, params, progress_callback=None, should_cancel=No
         _unproject_in_place(results, ds.crs)
 
     summary = _summarize(results, total_samples, time.time() - started)
-    return {'segments': results, 'summary': summary}
+    # `mask` es `None` salvo en modo `segmentation`: los otros modos no producen máscara y no deben
+    # persistir ninguna (`008` FR-006).
+    return {'segments': results, 'summary': summary, 'mask': mask_document}
 
 
 def _apply_coherence(segments, retained, offsets, params, unit_factor, window):
@@ -516,11 +582,17 @@ def _unproject_in_place(segments, crs):
             segment[key][i] = point
 
 
-def _read_block(ds, segments, index, size, offsets, cum, coords):
+def _read_block(ds, segments, index, size, offsets, cum, coords, mask_ds=None):
     """Lee de una vez las muestras de `size` tramos desde `index`, partiendo si no caben.
 
     La estimación analítica de `block_size_for` supone un eje recto; uno curvo genera una ventana
     mayor de lo previsto, así que el tamaño real se vuelve a comprobar aquí antes de leer.
+
+    `mask_ds`, en modo `segmentation`, es la máscara ya abierta (`analyze()`): se muestrea con las
+    mismas coordenadas `(xs, ys)` que el DEM, asumiendo que comparten CRS con la ortofoto —cierto
+    en el caso normal de un mismo proyecto ODM (`research.md` D25). El particionado de bloques se
+    decide en función de `ds`, no de `mask_ds`: es la ventana del DEM la que fija el techo de
+    memoria, y la máscara se muestrea punto a punto con su propio transform, sin ventana propia.
     """
     while True:
         chunk = []
@@ -547,14 +619,18 @@ def _read_block(ds, segments, index, size, offsets, cum, coords):
             continue
 
         values = _sample(ds, xs, ys)
+        mask_values = _sample(mask_ds, xs, ys) if mask_ds is not None else None
         out = []
         cursor = 0
         for entry in chunk:
             n_axis, n_cross = entry['n_axis'], entry['n_cross']
-            out.append({
+            item = {
                 'axis': values[cursor:cursor + n_axis],
                 'cross': values[cursor + n_axis:cursor + n_axis + n_cross],
-            })
+            }
+            if mask_values is not None:
+                item['mask'] = mask_values[cursor + n_axis:cursor + n_axis + n_cross]
+            out.append(item)
             cursor += n_axis + n_cross
         return out, size
 
@@ -666,7 +742,7 @@ def estimate(plan_length, params):
 
 
 def run_analysis(task_id, analysis_id, dem_path, vertices, params, source_mtime=None,
-                 progress_callback=None, should_cancel=None):
+                 progress_callback=None, should_cancel=None, orthophoto_path=None):
     """Función de worker: calcula, persiste los tramos y cierra la entrada del índice.
 
     IMPORTANTE — debe ser **self-contained**: WebODM la ejecuta reejecutando su código fuente en un
@@ -674,7 +750,9 @@ def run_analysis(task_id, analysis_id, dem_path, vertices, params, source_mtime=
     `ns = {}`), sin los globals del módulo. Por eso todos los imports van **dentro** y son
     **absolutos**, y las funciones y constantes auxiliares se alcanzan a través del módulo
     importado (`compute.*`) — nunca por nombre libre ni con imports relativos (`from . import ...`).
-    Mismo patrón que `coreplugins/realign/corrections.py`.
+    Mismo patrón que `coreplugins/realign/corrections.py`. `segmentation` no se importa aquí de
+    forma directa por el mismo motivo que `coherence` no lo hacía en `006/D23`: entra ya cargado
+    por el propio import de `compute`, que lo usa internamente en modo `segmentation`.
 
     El candado de ejecución se libera **siempre**, salga por donde salga: dejarlo tomado inutiliza
     la funcionalidad para esa tarea hasta que alguien borre el estado a mano.
@@ -699,10 +777,12 @@ def run_analysis(task_id, analysis_id, dem_path, vertices, params, source_mtime=
 
     try:
         result = compute.analyze(dem_path, vertices, params,
-                                 progress_callback=_report, should_cancel=should_cancel)
+                                 progress_callback=_report, should_cancel=should_cancel,
+                                 orthophoto_path=orthophoto_path)
     except compute.Canceled:
         # Sin resultados parciales (FR-034): lo que había a medias no se conserva.
         store.delete_segments(task_id, analysis_id)
+        store.delete_mask(task_id, analysis_id)
         _finish({'status': 'canceled', 'progress': None, 'celery_task_id': None})
         store.release_running(task_id, analysis_id)
         return {'canceled': True}
@@ -710,6 +790,7 @@ def run_analysis(task_id, analysis_id, dem_path, vertices, params, source_mtime=
         # Sin esto el análisis se quedaba en 'running' para siempre: el fallo solo vivía en el
         # resultado de Celery, que se pierde al recargar la página.
         store.delete_segments(task_id, analysis_id)
+        store.delete_mask(task_id, analysis_id)
         _finish({'status': 'failed', 'progress': None, 'error': str(e),
                  'celery_task_id': None})
         store.release_running(task_id, analysis_id)
@@ -721,7 +802,23 @@ def run_analysis(task_id, analysis_id, dem_path, vertices, params, source_mtime=
         'generated_at': _now(),
         'segments': result['segments'],
     })
-    _finish({'status': 'completed', 'progress': None, 'error': None,
+    # Máscara del modelo (`008` FR-001): solo la produce el modo `segmentation`, y se guarda aparte
+    # del documento de tramos para no encarecer las lecturas que no la usan (`research.md` D35).
+    # Sin imports nuevos aquí: esta función es self-contained —`run_function_async` la recompila
+    # desde su código fuente en un espacio de nombres vacío— y alcanza `segmentation` a través del
+    # import de módulo que ya tiene `compute`, igual que `coherence` en `006`/D23 (`research.md` D41).
+    mask_document = result.get('mask')
+    has_mask = mask_document is not None
+    if has_mask:
+        store.write_mask(task_id, analysis_id, {
+            'version': store.MASK_SCHEMA_VERSION,
+            'analysis_id': analysis_id,
+            'generated_at': _now(),
+            'resolution_m': mask_document['resolution_m'],
+            'simplify_tolerance_m': mask_document['simplify_tolerance_m'],
+            'features': mask_document['features'],
+        })
+    _finish({'status': 'completed', 'progress': None, 'error': None, 'has_mask': has_mask,
              'summary': result['summary'], 'source_mtime': source_mtime,
              'celery_task_id': None})
     store.release_running(task_id, analysis_id)

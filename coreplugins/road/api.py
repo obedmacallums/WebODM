@@ -10,6 +10,7 @@ Los errores viajan siempre con la misma forma, `{"error", "code"}`: el frontend 
 """
 
 import datetime
+import os
 import uuid
 
 from rest_framework import status
@@ -29,17 +30,26 @@ from . import compute, export, geometry, sources, store
 ERR_INVALID_PARAMETER = 'invalid_parameter'
 ERR_INVALID_AXIS = 'invalid_axis'
 ERR_NO_ELEVATION_MODEL = 'no_elevation_model'
+ERR_NO_ORTHOPHOTO = 'no_orthophoto'
 ERR_UNAVAILABLE_VARIANT = 'unavailable_variant'
 ERR_NOT_FOUND = 'not_found'
 ERR_ANALYSIS_RUNNING = 'analysis_running'
 ERR_CONFIRMATION_REQUIRED = 'confirmation_required'
 ERR_RESULT_MISSING = 'result_missing'
+ERR_MASK_MISSING = 'mask_missing'
 
 
 def error(message, code, http_status=status.HTTP_400_BAD_REQUEST, **extra):
     payload = {'error': str(message), 'code': code}
     payload.update(extra)
     return Response(payload, status=http_status)
+
+
+def no_orthophoto():
+    """`400 no_orthophoto` (`007/contracts/rest-api-delta.md`): el modo `segmentation` necesita
+    ortofoto y esta tarea no la tiene. Se comprueba por la columna `orthophoto_extent`, igual que
+    `no_elevation_model()` comprueba `dsm_extent`/`dtm_extent` sin tocar el disco."""
+    return error(_('La tarea no tiene ortofoto.'), ERR_NO_ORTHOPHOTO)
 
 
 def no_elevation_model():
@@ -90,6 +100,11 @@ def _analysis_response(task, analysis, thresholds):
     payload['stale'] = sources.is_stale(task, analysis)
     payload['color_thresholds'] = thresholds['color']
     payload['width_thresholds'] = thresholds['width']
+    # Siempre explícito (`008` FR-015): los análisis anteriores a `008` no traen el campo en el
+    # índice, y el cliente no debería tener que distinguir «ausente» de «falso» para saber si
+    # ofrecer la capa. La máscara en sí **no** viaja aquí: se pide aparte y solo al encenderla
+    # (`research.md` D36), porque por defecto está apagada y son decenas de KB.
+    payload['has_mask'] = store.analysis_has_mask(analysis)
     return payload
 
 
@@ -265,6 +280,12 @@ class AnalysisList(TaskView):
         if err:
             return error(err, ERR_INVALID_PARAMETER)
 
+        # `007/data-model.md §4`: a diferencia de `break` y `surface`, que solo requieren DEM, el
+        # modo `segmentation` requiere ortofoto. Se comprueba aquí y no se deja para que falle en
+        # el worker, con el mismo criterio que ya usa `_resolve_model_and_variant` para el DEM.
+        if params['edge_mode'] == sources.EDGE_MODE_SEGMENTATION and task.orthophoto_extent is None:
+            return no_orthophoto()
+
         source, suggested_name, failure = _resolve_axis(task, data, described, request, model)
         if failure is not None:
             return failure
@@ -300,7 +321,7 @@ class AnalysisList(TaskView):
             # nada — el usuario los leería como si describieran lo que acaba de pedir.
             if existing is not None:
                 store.delete_segments(str(task.id), analysis_id)
-
+                store.delete_mask(str(task.id), analysis_id)
             analysis = {
                 'id': analysis_id,
                 'name': str(data.get('name')
@@ -325,11 +346,18 @@ class AnalysisList(TaskView):
             }
             store.upsert_analysis(str(task.id), analysis)
 
+            # `007/FR-005`: la ruta de la ortofoto solo se resuelve y se pasa en modo
+            # `segmentation` — los otros dos modos no la usan para nada. La disponibilidad ya se
+            # comprobó antes de llegar aquí (T005), así que el asset existe.
+            orthophoto_path = (os.path.abspath(task.get_asset_download_path('orthophoto.tif'))
+                               if params['edge_mode'] == sources.EDGE_MODE_SEGMENTATION else None)
+
             async_result = run_function_async(
                 compute.run_analysis,
                 str(task.id), analysis_id, described['path'], source['vertices'], params,
                 analysis['source_mtime'],
                 with_progress=True, with_cancel=True,
+                orthophoto_path=orthophoto_path,
             )
         except Exception:
             # Sin esto, un fallo al lanzar deja el candado tomado y la tarea inutilizable.
@@ -454,6 +482,7 @@ class AnalysisDetail(TaskView):
             cancel_analysis(task, analysis)
 
         store.delete_segments(str(task.id), analysis_id)
+        store.delete_mask(str(task.id), analysis_id)
         store.remove_analysis(str(task.id), analysis_id)
         store.release_running(str(task.id), analysis_id)
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -477,6 +506,47 @@ class AnalysisDetail(TaskView):
             payload['segments'] = document.get('segments', [])
 
         return Response(payload, status=status.HTTP_200_OK)
+
+
+class AnalysisMask(TaskView):
+    """`GET task/<pk>/analyses/<analysis_id>/mask` — lo que el modelo clasificó como calzada.
+
+    Existe para que el usuario pueda **auditar** la medición del modo `segmentation`, que puede
+    desviarse varios metros: en la calle de referencia el modelo marcó como calzada un descampado
+    de tierra contiguo, y eso solo se descubrió rescatando a mano un fichero temporal. Sin esta
+    ruta, la cifra de ancho es incontrastable desde la interfaz.
+
+    Ruta separada y no embebida en el detalle del análisis (`research.md` D36): la capa está
+    apagada por defecto (`FR-014`), así que quien no la enciende no debe pagar sus decenas de KB.
+    """
+
+    def get(self, request, pk=None, analysis_id=None):
+        task = self.get_and_check_task(request, pk)
+        analysis = store.get_analysis(str(task.id), analysis_id)
+        if analysis is None:
+            return error(_('El análisis no existe en esta tarea.'), ERR_NOT_FOUND,
+                         status.HTTP_404_NOT_FOUND)
+
+        document = store.read_mask(str(task.id), analysis_id)
+        if document is None:
+            # **No es lo mismo que una máscara vacía.** Una máscara con `features: []` significa
+            # que el modelo corrió y no reconoció calzada —un resultado, que además explica por
+            # qué los tramos salieron sin borde—; esto significa que nunca se guardó nada, porque
+            # el análisis es anterior a `008` o no es de modo segmentación (`FR-017`).
+            return error(_('Este análisis no tiene guardada la máscara del modelo.'),
+                         ERR_MASK_MISSING, status.HTTP_404_NOT_FOUND)
+
+        return Response({
+            'version': document.get('version'),
+            'analysis_id': analysis_id,
+            'generated_at': document.get('generated_at'),
+            # La resolución viaja con los datos y no como constante del cliente: es lo que sostiene
+            # el aviso de precisión del panel (`FR-016`), y codificada a mano dejaría de ser cierta
+            # en cuanto el modelo cambiara.
+            'resolution_m': document.get('resolution_m'),
+            'simplify_tolerance_m': document.get('simplify_tolerance_m'),
+            'features': document.get('features') or [],
+        }, status=status.HTTP_200_OK)
 
 
 class _IgnoreFormatQueryParam(DefaultContentNegotiation):
@@ -570,7 +640,7 @@ def cancel_analysis(task, analysis):
             pass
 
     store.delete_segments(str(task.id), analysis_id)
-
+    store.delete_mask(str(task.id), analysis_id)
     def mutate(a):
         a.update({'status': 'canceled', 'progress': None, 'celery_task_id': None,
                   'updated_at': _now()})

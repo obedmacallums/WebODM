@@ -318,3 +318,24 @@
     }
   }
 }
+
+// Capa de máscara del modelo (`008`). Discreto a propósito: es una herramienta de auditoría, no
+// una métrica más del análisis.
+.road-mask {
+  margin: 6px 0 2px;
+
+  label {
+    font-weight: normal;
+    margin: 0;
+    cursor: pointer;
+
+    input { margin-right: 6px; }
+  }
+
+  .road-mask-note {
+    margin-top: 2px;
+    padding-left: 20px;
+    font-size: 11px;
+    opacity: 0.75;
+  }
+}

@@ -359,6 +359,71 @@ def delete_segments(task_id, analysis_id):
             pass
 
 
+# --- Almacén de máscaras de segmentación (`008` FR-004) ----------------------------------
+#
+# Hermano del almacén de tramos: mismo directorio, mismo mecanismo del framework
+# (`get_plugins_persistent_path`) y mismo ciclo de vida. La constitución exige que los datos
+# persistentes de plugins vayan por ahí y **nunca** por rutas ad-hoc del contenedor; antes de `008`
+# la máscara solo existía en un temporal de `MEDIA_TMP` que nadie limpiaba ni servía.
+#
+# Vive en un archivo aparte y no dentro del documento de tramos a propósito: ese documento lo leen
+# `AnalysisDetail.get` y también las exportaciones, que no usan la máscara para nada y cargarían
+# decenas de KB de polígonos en cada descarga CSV (`research.md` D35).
+
+MASK_SCHEMA_VERSION = 1
+
+
+def mask_path(task_id, analysis_id):
+    return os.path.join(segments_dir(task_id), '{}.mask.json'.format(analysis_id))
+
+
+def write_mask(task_id, analysis_id, payload):
+    """Escribe la máscara de forma atómica, igual que `write_segments` y por la misma razón: un
+    worker cancelado a media escritura dejaría un JSON truncado que el `GET` no sabría distinguir
+    de un resultado válido."""
+    directory = segments_dir(task_id)
+    os.makedirs(directory, exist_ok=True)
+    path = mask_path(task_id, analysis_id)
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(payload, f)
+    os.replace(tmp, path)
+    return path
+
+
+def read_mask(task_id, analysis_id):
+    """Documento de máscara, o `None` si no está o no es legible.
+
+    `None` aquí **no es una anomalía**: es el estado esperado de los análisis anteriores a `008` y
+    de los modos `break`/`surface`. Quien llama debe distinguirlo de una máscara con `features: []`,
+    que sí es un resultado —el modelo corrió y no vio calzada— y explica por qué los tramos
+    salieron sin borde (`FR-017`).
+    """
+    try:
+        with open(mask_path(task_id, analysis_id)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def delete_mask(task_id, analysis_id):
+    for path in (mask_path(task_id, analysis_id), mask_path(task_id, analysis_id) + '.tmp'):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def analysis_has_mask(analysis):
+    """Si este análisis tiene máscara guardada, sin tocar el disco (`FR-015`, D37).
+
+    Los análisis escritos antes de `008` no traen el campo. Su ausencia se interpreta como «no hay
+    máscara», en memoria y sin reescribir nada — mismo criterio que `_upgrade_segments` aplica a los
+    documentos de `005` (`006`/FR-024).
+    """
+    return bool((analysis or {}).get('has_mask'))
+
+
 def delete_task_segments(task_id):
     """Borra el directorio de tramos entero (borrado en cascada al eliminarse la tarea)."""
     import shutil

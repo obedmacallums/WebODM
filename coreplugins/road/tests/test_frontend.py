@@ -38,6 +38,9 @@ class FrontendUnitTest(SimpleTestCase):
     def test_road_bridge_coexists_on_the_core_bus(self):
         self._run_js('roadBridge.test.js')
 
+    def test_mask_layer(self):
+        self._run_js('maskLayer.test.js')
+
     def test_panel_logic_decisions(self):
         """Siembra de parámetros, ciclo publicar/despublicar del sondeo y selección de eje tras
         un refresco: las tres decisiones que antes obligaban a recargar la página."""

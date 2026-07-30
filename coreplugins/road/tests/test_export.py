@@ -60,6 +60,15 @@ INFERRED = segment(3, status='inferred', width=9.8, offset_left=4.0, offset_righ
                    left_edge_source='measured', right_edge_source='inferred',
                    right_reason='no_break')
 
+# `007` User Story 3: un análisis en modo segmentación, con un tramo que tiene el motivo nuevo
+# `no_orthophoto` en un lado. Ni el CSV ni el GeoJSON necesitan ningún cambio de esquema para
+# llevarlo — es texto libre dentro de un campo que ya se exportaba (`data-model.md §6`).
+ANALYSIS_SEGMENTATION = dict(ANALYSIS, params=dict(ANALYSIS['params'], edge_mode='segmentation'))
+SEGMENTATION_PARTIAL = segment(4, status='no_edge', width=None, cross_slope=None,
+                               offset_right=None, left_edge_source='measured',
+                               right_edge_source=None, left_reason=None,
+                               right_reason='no_orthophoto', edge_right=None)
+
 
 class CsvTest(RoadTestBase):
     def _rows(self, segments):
@@ -243,6 +252,43 @@ class GeoJsonTest(RoadTestBase):
         self.assertEqual(props['variant'], 'original')
         self.assertEqual(props['params']['segment_length'], 5.0)
         self.assertEqual(props['name'], 'Camino norte')
+
+
+class SegmentationModeExportTest(RoadTestBase):
+    """`007` User Story 3: el modo `segmentation` y su motivo nuevo (`no_orthophoto`) viajan por
+    el mismo contrato de exportación que `006` ya definió, sin ningún cambio de esquema en
+    `export.py` (`plan.md`, Project Structure) — estos tests demuestran que no hacía falta."""
+
+    def test_csv_carries_the_segmentation_mode_in_the_comment_block(self):
+        text = export.to_csv(ANALYSIS_SEGMENTATION, [segment(0)])
+        comments = '\n'.join(l for l in text.splitlines() if l.startswith('#'))
+
+        self.assertIn('segmentation', comments)
+
+    def test_csv_row_carries_the_new_reason_like_any_other(self):
+        text = export.to_csv(ANALYSIS_SEGMENTATION, [SEGMENTATION_PARTIAL])
+        body = [l for l in text.splitlines() if not l.startswith('#')]
+        rows = list(csv.reader(io.StringIO('\n'.join(body))))
+        row = dict(zip(rows[0], rows[1]))
+
+        self.assertEqual(row['right_reason'], 'no_orthophoto')
+        self.assertIsNone(SEGMENTATION_PARTIAL['left_reason'])
+        self.assertEqual(row['left_edge_source'], 'measured')
+        self.assertEqual(row['right_edge_source'], '')
+        self.assertEqual(row['offset_right'], '')  # vacío, no cero (FR-022)
+
+    def test_geojson_carries_the_segmentation_mode_and_the_new_reason(self):
+        doc = json.loads(export.to_geojson(ANALYSIS_SEGMENTATION, [SEGMENTATION_PARTIAL]))
+
+        self.assertEqual(doc['properties']['params']['edge_mode'], 'segmentation')
+        feature = next(f for f in doc['features'] if f['properties']['kind'] == 'segment')
+        self.assertEqual(feature['properties']['right_reason'], 'no_orthophoto')
+        self.assertEqual(feature['properties']['left_edge_source'], 'measured')
+
+        # El lado sin borde no emite punto de borde (mismo criterio que `test_absent_edges...`).
+        edges = {f['properties']['side'] for f in doc['features']
+                if f['properties']['kind'] == 'edge'}
+        self.assertEqual(edges, {'left'})
 
 
 class FilenameTest(RoadTestBase):

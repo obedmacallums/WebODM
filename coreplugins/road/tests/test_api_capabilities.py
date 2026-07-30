@@ -58,7 +58,8 @@ class CapabilitiesTest(RoadTestBase):
 
         res = self.client.get(self._url(task, 'capabilities'))
 
-        self.assertEqual(res.data['edge_modes'], ['break', 'surface'])
+        # `007/FR-014`: el tercer modo aparece aquí solo, sin que `Capabilities.get` se toque.
+        self.assertEqual(res.data['edge_modes'], ['break', 'surface', 'segmentation'])
         self.assertEqual(res.data['defaults']['edge_mode'], 'break')
         self.assertEqual(res.data['defaults']['surface_tolerance'], 0.06)
         self.assertEqual(res.data['defaults']['coherence_window'], 0)
