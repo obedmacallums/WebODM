@@ -1,0 +1,35 @@
+index,station_start,station_end,length,elevation,grade_pct,grade_deg,width,offset_left,offset_right,cross_slope_pct,status,left_reason,right_reason,left_edge_source,right_edge_source,width_min,width_max,width_sections,width_measured_sections
+0,0.000,4.000,4.000,4186.708,8.434,4.821,13.000,4.500,8.500,-5.546,inferred,,,inferred,measured,12.000,13.000,4,4
+1,4.000,8.000,4.000,4187.048,9.922,5.666,12.000,4.000,8.000,-7.284,measured,,,measured,measured,11.500,13.500,4,4
+2,8.000,12.000,4.000,4187.393,6.636,3.796,12.000,4.500,7.500,-10.435,measured,,,measured,measured,12.000,12.500,4,4
+3,12.000,16.000,4.000,4187.650,7.948,4.544,12.250,4.500,7.750,-8.947,inferred,,,measured,inferred,6.500,13.000,4,4
+4,16.000,20.000,4.000,4187.988,9.634,5.503,13.000,5.000,8.000,-6.962,measured,,,measured,measured,12.000,13.000,4,4
+5,20.000,24.000,4.000,4188.368,7.098,4.060,12.000,5.000,7.000,-9.121,measured,,,measured,measured,9.000,13.000,4,4
+6,24.000,28.000,4.000,4188.699,8.971,5.126,8.000,5.000,3.000,1.482,measured,,,measured,measured,7.500,14.500,4,4
+7,28.000,32.000,4.000,4189.064,9.032,5.161,9.000,5.000,4.000,2.592,inferred,,,inferred,measured,8.000,15.000,4,4
+8,32.000,36.000,4.000,4189.418,8.195,4.685,8.000,4.000,4.000,-1.248,measured,,,measured,measured,7.500,14.000,4,4
+9,36.000,40.000,4.000,4189.807,12.681,7.227,8.000,4.500,3.500,0.030,measured,,,measured,measured,7.500,8.500,4,4
+10,40.000,44.000,4.000,4190.177,4.512,2.583,9.000,5.000,4.000,-0.213,inferred,,,measured,inferred,9.000,14.000,4,4
+11,44.000,48.000,4.000,4190.448,10.641,6.074,12.000,8.500,3.500,5.989,measured,,,measured,measured,9.500,15.500,4,4
+12,48.000,52.000,4.000,4190.993,16.073,9.131,15.000,6.000,9.000,-11.613,measured,,,measured,measured,11.000,18.500,4,4
+13,52.000,56.000,4.000,4191.553,13.071,7.447,12.000,6.000,6.000,-0.490,measured,,,measured,measured,11.500,15.500,4,4
+14,56.000,60.000,4.000,4192.029,8.854,5.060,16.500,9.500,7.000,4.847,measured,,,measured,measured,15.000,20.500,4,4
+15,60.000,64.000,4.000,4192.381,9.795,5.594,13.000,6.000,7.000,1.435,inferred,,,measured,inferred,17.500,18.500,4,4
+16,64.000,68.000,4.000,4192.763,10.330,5.898,16.500,9.500,7.000,4.229,measured,,,measured,measured,16.000,21.000,4,4
+17,68.000,68.907,0.907,4193.060,17.730,10.054,16.500,9.500,7.000,3.575,inferred,,,inferred,inferred,17.000,17.000,1,1
+# analisis: okok
+# eje: 301e97d1-4876-4628-a07b-29c36b070f6c (annotation), longitud en planta 68.907 m
+# modelo: dtm / original
+# break_threshold: 25.0
+# coherence_window: 3
+# cross_section_spacing: 1.0
+# edge_mode: break
+# min_consecutive_samples: 4
+# sample_step: 0.5
+# search_half_width: 20.0
+# segment_length: 4.0
+# smooth_window: 2.0
+# surface_tolerance: 0.06
+# width_aggregation: median
+# unidades: distancias en m, pendientes en %, grade_deg en grados
+# las celdas vacias son metricas que no se pudieron medir, no ceros

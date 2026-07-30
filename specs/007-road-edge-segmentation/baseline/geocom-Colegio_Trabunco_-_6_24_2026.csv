@@ -1,0 +1,25 @@
+index,station_start,station_end,length,elevation,grade_pct,grade_deg,width,offset_left,offset_right,cross_slope_pct,status,left_reason,right_reason,left_edge_source,right_edge_source,width_min,width_max,width_sections,width_measured_sections
+0,0.000,5.000,5.000,393.469,-0.915,-0.524,,,,,no_edge,no_break,no_break,,,,,,
+1,5.000,10.000,5.000,393.453,0.275,0.157,,,,,no_edge,no_break,no_break,,,,,,
+2,10.000,15.000,5.000,393.970,20.381,11.520,,,,,no_edge,no_break,no_break,,,,,,
+3,15.000,20.000,5.000,394.039,-17.601,-9.983,,,,,no_edge,no_break,no_break,,,,,,
+4,20.000,25.000,5.000,393.535,-2.540,-1.455,,,,,no_edge,no_break,no_break,,,,,,
+5,25.000,30.000,5.000,393.426,-1.849,-1.059,,,,,no_edge,no_break,no_break,,,,,,
+6,30.000,35.000,5.000,393.522,5.689,3.256,,,,,no_edge,no_break,no_break,,,,,,
+7,35.000,40.000,5.000,393.518,-5.840,-3.342,,,,,no_edge,no_break,no_break,,,,,,
+8,40.000,45.000,5.000,393.332,-1.613,-0.924,,,,,no_edge,no_break,no_break,,,,,,
+9,45.000,50.000,5.000,393.255,-1.467,-0.841,,,,,no_edge,no_break,no_break,,,,,,
+10,50.000,55.000,5.000,393.221,0.139,0.079,,,,,no_edge,no_break,no_break,,,,,,
+11,55.000,60.000,5.000,393.220,-0.206,-0.118,,,,,no_edge,no_break,no_break,,,,,,
+12,60.000,65.000,5.000,393.222,0.297,0.170,,,,,no_edge,no_break,no_break,,,,,,
+13,65.000,68.534,3.534,393.218,-0.673,-0.385,,,,,no_edge,no_break,no_break,,,,,,
+# analisis: Polilínea 1
+# eje: 6dedf4ba-9aa6-460a-87c4-07fd24e545ca (annotation), longitud en planta 68.534 m
+# modelo: dsm / realigned
+# break_threshold: 15.0
+# min_consecutive_samples: 10
+# sample_step: 5.0
+# search_half_width: 40.0
+# segment_length: 5.0
+# unidades: distancias en m, pendientes en %, grade_deg en grados
+# las celdas vacias son metricas que no se pudieron medir, no ceros

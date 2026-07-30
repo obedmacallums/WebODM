@@ -1,0 +1,31 @@
+index,station_start,station_end,length,elevation,grade_pct,grade_deg,width,offset_left,offset_right,cross_slope_pct,status,left_reason,right_reason,left_edge_source,right_edge_source,width_min,width_max,width_sections,width_measured_sections
+0,0.000,5.000,5.000,514.018,-0.639,-0.366,7.695,4.270,3.425,3.748,inferred,,,measured,inferred,4.400,9.200,10,10
+1,5.000,10.000,5.000,514.006,-0.253,-0.145,7.470,4.020,3.450,2.774,measured,,,measured,measured,7.000,8.300,10,10
+2,10.000,15.000,5.000,514.002,-0.229,-0.131,7.390,3.990,3.400,4.068,inferred,,,inferred,measured,6.900,11.600,10,10
+3,15.000,20.000,5.000,513.991,-0.767,-0.439,7.280,3.960,3.320,2.694,measured,,,measured,measured,3.800,8.300,10,10
+4,20.000,25.000,5.000,513.983,0.537,0.308,7.440,3.950,3.490,2.149,measured,,,measured,measured,6.100,9.400,10,10
+5,25.000,30.000,5.000,513.992,-0.946,-0.542,7.260,3.880,3.380,2.185,measured,,,measured,measured,5.500,9.400,10,10
+6,30.000,35.000,5.000,513.984,0.723,0.414,7.065,3.915,3.150,3.925,inferred,,,inferred,measured,6.800,12.400,10,10
+7,35.000,40.000,5.000,513.997,-0.093,-0.053,6.790,3.780,3.010,4.514,measured,,,measured,measured,4.100,8.300,10,10
+8,40.000,45.000,5.000,514.003,0.933,0.535,8.860,3.980,4.880,3.774,measured,,,measured,measured,7.300,10.400,10,10
+9,45.000,50.000,5.000,514.029,-0.144,-0.082,10.390,3.900,6.490,3.689,measured,,,measured,measured,7.200,13.500,10,10
+10,50.000,55.000,5.000,514.047,0.931,0.533,8.440,3.770,4.670,3.126,inferred,,,measured,inferred,9.600,14.800,10,10
+11,55.000,60.000,5.000,514.073,-0.449,-0.257,8.260,3.800,4.460,2.811,measured,,,measured,measured,7.000,10.200,10,10
+12,60.000,65.000,5.000,514.075,0.462,0.265,7.120,3.720,3.400,2.874,measured,,,measured,measured,6.700,8.000,10,10
+13,65.000,66.053,1.053,514.099,-0.395,-0.226,7.200,3.600,3.600,2.862,measured,,,measured,measured,6.900,7.500,2,2
+# analisis: Polilínea 1
+# eje: 09bf4019-2118-400b-b2a1-908cd8409352 (annotation), longitud en planta 66.053 m
+# modelo: dtm / original
+# break_threshold: 15.0
+# coherence_window: 2
+# cross_section_spacing: 0.5
+# edge_mode: surface
+# min_consecutive_samples: 2
+# sample_step: 0.1
+# search_half_width: 20.0
+# segment_length: 5.0
+# smooth_window: 0.0
+# surface_tolerance: 0.1
+# width_aggregation: mean
+# unidades: distancias en m, pendientes en %, grade_deg en grados
+# las celdas vacias son metricas que no se pudieron medir, no ceros
