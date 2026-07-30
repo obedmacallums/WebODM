@@ -246,8 +246,8 @@ resumen, y comprobar que avisa de ello antes de dejar exportar.
 - **FR-003**: Un dataset DEBE tener una lista ordenada de clases, cada una con un índice entero
   consecutivo desde 0 y un nombre elegido por el usuario. El índice es lo que acaba grabado en las
   máscaras y en los metadatos del modelo entrenado; el nombre es lo que se muestra.
-- **FR-004**: El índice 0 DEBE corresponder por convención a la clase negativa o de fondo. Motivo:
-  es lo que espera `geodeep`, cuyo modelo de serie declara `class_names = ['not_road', 'road']`.
+- **FR-004**: El índice 0 DEBE corresponder por convención a la clase negativa o de fondo, porque es
+  lo que espera la librería de inferencia que consumirá el modelo entrenado.
 - **FR-005**: Un dataset DEBE tener una resolución de trabajo en cm/px, fijada al crearlo, con
   **10 cm/px por defecto**.
 - **FR-006**: El sistema DEBE impedir borrar una clase que tenga etiquetas asociadas, o exigir
@@ -267,9 +267,9 @@ resumen, y comprobar que avisa de ello antes de dejar exportar.
   geometría georreferenciada con su clase y su posición en un orden explícito. NO se guardan píxeles.
 - **FR-012**: Al componer las etiquetas, las posteriores en el orden DEBEN prevalecer sobre las
   anteriores en las zonas solapadas. El orden por defecto es el de creación: lo último dibujado gana.
-- **FR-012b**: La conversión de un trazo de pincel a superficie DEBE realizarse en un sistema de
-  coordenadas métrico. Justificación: el radio está en metros (FR-010) y en EPSG:4326 se
-  interpretaría como grados, dando un trazo unas cinco órdenes de magnitud mayor.
+- **FR-012b**: La conversión de un trazo de pincel a superficie DEBE hacerse sobre unidades de
+  terreno. Justificación: el radio está en metros (FR-010), y aplicarlo sobre coordenadas
+  angulares lo interpretaría como grados, produciendo un trazo cinco órdenes de magnitud mayor.
 - **FR-013**: Los usuarios DEBEN poder seleccionar, modificar y borrar etiquetas ya creadas.
 - **FR-014**: DEBE existir un borrador que devuelva una zona al estado «sin etiquetar», distinto de
   marcarla como clase 0.
@@ -277,9 +277,9 @@ resumen, y comprobar que avisa de ello antes de dejar exportar.
   más fina que la resolución del dataset. Justificación: por debajo de esa resolución la etiqueta no
   contiene información que la exportación pueda representar, así que esos vértices no se pierden —
   nunca llegaron a significar nada.
-- **FR-016**: Las etiquetas DEBEN persistirse mediante los mecanismos del framework
-  (`GlobalDataStore` y `get_persistent_path()`), **nunca** en rutas ad-hoc del contenedor ni en
-  directorios temporales.
+- **FR-016**: Las etiquetas y los paquetes exportados DEBEN persistirse mediante los mecanismos de
+  almacenamiento del framework de plugins, **nunca** en rutas ad-hoc del contenedor ni en
+  directorios temporales. (Constitución, «Restricciones de infraestructura».)
 - **FR-017**: El sistema DEBE proteger la escritura concurrente de etiquetas de una misma tarea, de
   forma que dos usuarios simultáneos no se pisen el trabajo.
 
@@ -302,8 +302,9 @@ resumen, y comprobar que avisa de ello antes de dejar exportar.
 - **FR-023**: Las teselas de imagen DEBEN salir remuestreadas a la resolución del dataset, no a la
   nativa de cada ortofoto, para que todas las tareas del dataset compartan escala.
 - **FR-024**: Las teselas DEBEN ser cuadradas, de un tamaño en píxeles configurable por dataset, con
-  **512 por defecto**. Justificación: `geodeep` deduce el tamaño de tesela de la forma del tensor de
-  entrada del modelo (`tiles_size = inputs[0].shape[-1]`), y el modelo de serie usa 512.
+  **512 por defecto**. Justificación: la librería de inferencia deduce el tamaño de tesela de la
+  forma de la entrada del modelo, y los modelos de segmentación con los que debe ser compatible
+  usan 512.
 - **FR-025**: Cada tesela de imagen DEBE tener una máscara del mismo tamaño en píxeles, donde el
   valor de cada píxel es el índice de la clase que le corresponde.
 - **FR-026**: Los píxeles sin etiquetar DEBEN llevar en la máscara un valor reservado de «ignorar»,
@@ -312,7 +313,7 @@ resumen, y comprobar que avisa de ello antes de dejar exportar.
   no etiquetado se exportara como clase 0, cada camino que el usuario olvidara marcar se convertiría
   en un ejemplo que le enseña al modelo que los caminos no son caminos. Ese fallo es silencioso y
   arruina el entrenamiento; el fallo contrario —que el modelo no aprenda el fondo— es ruidoso y lo
-  avisa FR-032.
+  avisa FR-033.
 - **FR-027**: La exportación DEBE omitir las teselas sin contenido etiquetado y las que no tengan
   suficientes píxeles válidos de ortofoto. Ambos umbrales son configurables por dataset, con estos
   valores por defecto: se descarta la tesela si menos del **1 %** de su superficie está etiquetada, o
@@ -344,12 +345,11 @@ resumen, y comprobar que avisa de ello antes de dejar exportar.
   upstream (`app/`, `webodm/`, `worker/`, `nodeodm/`, `nginx/` ni los scripts de raíz).
 - **FR-036**: Esta feature NO DEBE cambiar el comportamiento de `road`, `annotations` ni ningún otro
   plugin existente. `road` sigue usando el modelo `roads` de serie hasta la fase 2.
-- **FR-037**: El plugin NO DEBE introducir dependencias de sistema nuevas en la imagen, ni
-  dependencias de npm en el frontend. Comprobado **en el contenedor `worker`**, que es donde correría
-  la exportación: `rasterio 1.3.10`, `numpy 1.26.2`, `Pillow 11.3.0` y GEOS de GeoDjango están
-  presentes. `shapely` **no está**, así que el motor geométrico es el GEOS de GeoDjango y
-  `rasterio.features.rasterize` se alimenta con diccionarios tipo GeoJSON, que es lo que ya hace
-  `road`.
+- **FR-037**: El plugin NO DEBE introducir dependencias nuevas: ni paquetes de sistema en la imagen,
+  ni librerías de frontend. Todo lo que necesita ya está disponible y en uso por otros plugins del
+  fork (inventario verificado en Assumptions).
+- **FR-038**: El plugin DEBE poder deshabilitarse sin romper el resto del sistema, y su presencia no
+  debe alterar el comportamiento de WebODM cuando está desactivado. (Constitución, Principio III.)
 
 ### Key Entities
 
@@ -375,9 +375,9 @@ resumen, y comprobar que avisa de ello antes de dejar exportar.
 - **SC-001**: Un usuario puede etiquetar una ortofoto y obtener un paquete de entrenamiento sin
   salir de WebODM, sin herramientas externas y sin asistencia técnica. Hoy no existe ningún camino
   para hacerlo.
-- **SC-002**: El paquete exportado es interpretable por un programa que solo tiene el fichero:
-  alguien que reciba el `.zip` y nada más puede escribir el cargador de datos leyendo únicamente el
-  manifiesto.
+- **SC-002**: El paquete exportado es interpretable por un programa que solo tiene el fichero: quien
+  reciba el paquete y nada más puede escribir el cargador de datos leyendo únicamente el manifiesto,
+  sin preguntar y sin acceso a WebODM.
 - **SC-003**: Las máscaras exportadas coinciden con lo dibujado. Sobre un dataset de prueba con
   geometrías conocidas, la máscara resultante es idéntica píxel a píxel a la esperada, incluida la
   regla de precedencia por orden.
@@ -390,7 +390,7 @@ resumen, y comprobar que avisa de ello antes de dejar exportar.
   resolución nativa y 172 a 21 cm/px— por la ley del cuadrado inverso: unas **758** a 10 cm/px. La
   cifra exacta debe remedirse durante la implementación.
 - **SC-007**: Exportar un dataset de varios cientos de teselas no bloquea la interfaz ni agota la
-  memoria del contenedor.
+  memoria del servidor: el usuario puede seguir trabajando mientras se genera.
 - **SC-008**: Un usuario que ha etiquetado solo una clase es advertido antes de exportar, no después
   de perder horas de GPU.
 
@@ -409,6 +409,11 @@ resumen, y comprobar que avisa de ello antes de dejar exportar.
   radio 2,5 m da un polígono de 118,14 m², y al rasterizarla a 10 cm/px con relleno 255 salen 11 825
   píxeles de clase 1 — 118,25 m², coincidente con el área del polígono— y el resto a «ignorar». El
   mecanismo central de la feature funciona con lo que ya hay instalado.
+- **Inventario de dependencias verificado, y verificado donde importa** (respalda FR-037). Comprobado
+  en el contenedor `worker`, no en `webapp`, porque la exportación corre ahí: `rasterio 1.3.10`,
+  `numpy 1.26.2`, `Pillow 11.3.0` y el GEOS de GeoDjango están presentes. `shapely` **no está**, así
+  que el motor geométrico es el GEOS de GeoDjango y el rasterizado se alimenta con geometrías en
+  formato GeoJSON — que es exactamente lo que `road` ya hace hoy.
 - **Pintar el fondo es barato gracias a la regla de precedencia por orden.** Un polígono enorme de
   clase 0 sobre toda la zona, y encima los caminos: cuatro clics. Sin esa regla, exigir fondo
   explícito (FR-026) sería una carga inaceptable; con ella, es asumible. Las dos decisiones se
