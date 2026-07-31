@@ -168,9 +168,14 @@ export function createLabelLayer(map, options = {}){
       // El hit-test lo hace Leaflet, que ya sabe si un punto cae dentro de un polígono o sobre
       // una polilínea de grosor dado. Reimplementarlo aquí habría sido código propio para
       // resolver algo que la librería resuelve mejor.
+      //
+      // **El clic solo se consume si quien escucha dice que lo ha usado.** Leaflet no avisa al
+      // mapa de un evento que una capa ha detenido (`Map._fireDOMEvent` sale en cuanto ve
+      // `_stopped`), así que detenerlo siempre hacía imposible dibujar encima de una etiqueta
+      // existente: el clic moría en ella y nunca llegaba a ser un vértice. Con áreas revisadas
+      // —que cubren el sector entero— eso significaba no poder dibujar ni un solo camino dentro.
       layer.on('click', e => {
-        if (Lib.DomEvent) Lib.DomEvent.stop(e);
-        onSelect(label, layer, e);
+        if (onSelect(label, layer, e) && Lib.DomEvent) Lib.DomEvent.stop(e);
       });
       group.addLayer(layer);
     });

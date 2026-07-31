@@ -188,6 +188,54 @@ test('el clic entrega el evento para que el panel pueda leer Shift', () => {
   layer.remove();
 });
 
+// --- Dibujar encima de una etiqueta existente ----------------------------------------------
+
+/* El caso que rompía el flujo de etiquetado entero: con un área revisada cubriendo el sector,
+ * **todos** los clics caen encima de ella. Si la capa se queda el evento, ninguno llega al mapa y
+ * no se puede dibujar un solo camino dentro.
+ *
+ * Leaflet no avisa al mapa de un evento que una capa ha detenido: `Map._fireDOMEvent` reparte a las
+ * capas y sale en cuanto una marca `_stopped`. Así que «detener» y «no poder dibujar encima» son la
+ * misma cosa, y la capa solo puede detenerlo cuando de verdad lo ha usado.
+ */
+function layerWithSpy(onSelect){
+  const map = createMap(RealL);
+  const stopped = [];
+  const spyL = Object.assign(Object.create(L), {
+    DomEvent: {stop: e => stopped.push(e)}
+  });
+  const layer = labelLayerModule.createLabelLayer(map, {L: spyL, onSelect});
+  layer.setClasses(classes);
+  layer.setLabels(labels(2));
+  return {map, layer, stopped};
+}
+
+test('un clic que selecciona sí se consume', () => {
+  // Sin esto, seleccionar una etiqueta abriría además el popup de la ortofoto del core.
+  const {layer, stopped} = layerWithSpy(() => true);
+  layer.layerFor('l0').fire('click', plainClick);
+  assert(stopped.length === 1, 'el clic no debe seguir su camino');
+  layer.remove();
+});
+
+test('un clic mientras se dibuja NO se consume', () => {
+  const {layer, stopped} = layerWithSpy(() => false);
+  layer.layerFor('l0').fire('click', plainClick);
+  assert(stopped.length === 0,
+         'tiene que llegar al mapa para convertirse en un vértice: es lo que permite dibujar un '
+         + 'camino dentro de un área revisada');
+  layer.remove();
+});
+
+test('sin nadie escuchando, el clic tampoco se consume', () => {
+  // El `onSelect` por defecto no devuelve nada. Quedarse el clic «por si acaso» dejaría al popup
+  // de la ortofoto sin abrirse encima de cualquier etiqueta.
+  const {layer, stopped} = layerWithSpy(undefined);
+  layer.layerFor('l1').fire('click', plainClick);
+  assert(stopped.length === 0);
+  layer.remove();
+});
+
 // --- Nodos de vértice sobre lo seleccionado ------------------------------------------------
 
 test('con varias seleccionadas se marcan sus vértices', () => {

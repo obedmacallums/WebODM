@@ -150,16 +150,19 @@ export default class TrainingPanel extends React.Component {
   // --- Selección y edición (FR-013) ---------------------------------------------------
 
   /**
-   * Clic sobre una etiqueta dibujada.
+   * Clic sobre una etiqueta dibujada. Devuelve si el clic queda consumido.
    *
    * Solo selecciona cuando no se está dibujando: durante un trazado, un clic sobre una etiqueta
-   * existente es un vértice más, no un intento de seleccionarla.
+   * existente es un vértice más, no un intento de seleccionarla. Devolver `false` es lo que deja
+   * que el clic siga hasta el mapa; sin eso no se puede dibujar un camino dentro de un área
+   * revisada, que es justo el caso normal.
    */
   selectLabel = (label, layer, event) => {
-    if (this.editor && this.editor.isActive()) return;
+    if (this.editor && this.editor.isActive()) return false;
 
     const selectedIds = nextSelection(this.state.selectedIds, label.id, isAdditive(event));
     this.applySelection(selectedIds, layer);
+    return true;
   };
 
   /**
