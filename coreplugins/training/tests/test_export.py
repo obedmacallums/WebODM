@@ -292,6 +292,32 @@ class ReviewedAreaTest(ExportTestBase):
         self.assertEqual(meta['curation']['negative_tiles'], len(meta['tiles']),
                          'sin ninguna clase pintada, toda tesela revisada es un negativo')
 
+    def test_a_tile_with_road_is_not_counted_as_a_hard_negative(self):
+        """El objetivo del 20-30 % se mide sobre negativos, y un negativo no tiene camino.
+
+        Marcar como difícil un área que además contiene caminos es legítimo —a veces el terreno
+        está entreverado y no se puede separar—, pero contar esas teselas como negativos difíciles
+        daría por cubierta una cuota que no lo está. La cuenta laxa se conserva aparte, como
+        diagnóstico.
+        """
+        self._review_all(self.dataset, self.task, hard_negative=True)
+        self._add_label(self.dataset, self.task, class_index=1, geometry=square(0, 0, 30))
+
+        _, meta = self.open_package(self.run_export())
+        curation = meta['curation']
+
+        with_road = [t for t in meta['tiles'] if t['positive_fraction'] > 0]
+        self.assertTrue(with_road, 'el camino tiene que llegar a alguna tesela')
+        self.assertTrue(all(t['hard_negative'] for t in with_road),
+                        'rozan la zona marcada, así que la bandera por tesela sí se pone')
+
+        self.assertEqual(curation['tiles_touching_hard_negative'], len(meta['tiles']))
+        self.assertEqual(curation['hard_negative_tiles'], curation['negative_tiles'],
+                         'solo las teselas sin ninguna clase cuentan como negativo difícil')
+        self.assertLess(curation['hard_negative_tiles'],
+                        curation['tiles_touching_hard_negative'],
+                        'y son menos que las que simplemente rozan la zona')
+
 
 class ElevationTest(ExportTestBase):
     def test_a_task_without_elevation_is_skipped_with_a_reason(self):

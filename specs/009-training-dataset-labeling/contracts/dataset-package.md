@@ -121,9 +121,10 @@ aparece dentro de las áreas que el anotador declaró revisadas ([D18](../resear
   "curation": {
     "min_reviewed_fraction": 0.9,
     "min_valid_fraction": 0.8,
-    "negative_tiles": 42,        // revisadas sin ninguna clase encima
-    "hard_negative_tiles": 0,
-    "hard_negative_fraction": 0.0
+    "negative_tiles": 42,                 // revisadas sin ninguna clase encima
+    "hard_negative_tiles": 12,            // de esas, las que caen en zona marcada como difícil
+    "tiles_touching_hard_negative": 15,   // incluye las que rozan la zona pero SÍ tienen camino
+    "hard_negative_fraction": 0.21        // hard_negative_tiles / total: el número del objetivo
   },
 
   "source_tasks": [{"task_id": "...", "crs": "EPSG:32719",
@@ -159,6 +160,9 @@ aparece dentro de las áreas que el anotador declaró revisadas ([D18](../resear
 3. **Leer `ceiling_m` del paquete**, no cablearlo: se mide por exportación.
 4. **No suponer que hay conjunto de validación.** Si `split.warning` no es `null`, no lo hay.
 5. **Vigilar `curation.hard_negative_fraction`**: la especificación pide mantenerla en 20-30 %.
+   Cuenta solo teselas **sin ninguna clase** que caen en zona marcada como difícil, que es la
+   definición de negativo difícil. `tiles_touching_hard_negative` es más laxo —incluye las que
+   rozan una zona marcada pero contienen camino— y sirve de diagnóstico, no de objetivo.
 
 `class_pixels` no incluye el 255: los píxeles ignorados se deducen restando del total. Sirve para
 calcular pesos por clase sin recorrer todas las máscaras.

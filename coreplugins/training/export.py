@@ -476,8 +476,18 @@ def _dataset_json(dataset, source_tasks, tiles, assignments, plans, split_warnin
     """
     ceilings = [t['roughness_ceiling_m'] for t in source_tasks if 'roughness_ceiling_m' in t]
     counts = split.summarize({k: v for k, v in assignments.items() if v is not None})
-    hard_negatives = sum(1 for t in tiles if t['hard_negative'])
+    # Tres cuentas distintas, y confundirlas haría inútil el objetivo del 20-30 %:
+    #
+    # - `negatives`: teselas revisadas sin ninguna clase encima. Negativos de cualquier tipo.
+    # - `hard_negatives`: los negativos que además caen en una zona marcada como difícil. **Es el
+    #   número que hay que comparar con el objetivo**: un negativo difícil es, por definición, una
+    #   muestra sin nada que detectar que aun así lo parece.
+    # - `touching`: teselas que rozan una zona marcada, tengan o no camino. Es diagnóstico, no
+    #   objetivo: una zona marcada puede solapar con caminos vecinos, y contar esas teselas como
+    #   negativos difíciles inflaría la proporción y daría por cubierta una cuota que no lo está.
     negatives = sum(1 for t in tiles if t['positive_fraction'] == 0)
+    hard_negatives = sum(1 for t in tiles if t['hard_negative'] and t['positive_fraction'] == 0)
+    touching = sum(1 for t in tiles if t['hard_negative'])
 
     return {
         'schema_version': SCHEMA_VERSION,
@@ -519,7 +529,13 @@ def _dataset_json(dataset, source_tasks, tiles, assignments, plans, split_warnin
             'min_valid_fraction': float(dataset['min_valid_fraction']),
             'negative_tiles': negatives,
             'hard_negative_tiles': hard_negatives,
+            'tiles_touching_hard_negative': touching,
             'hard_negative_fraction': round(float(hard_negatives) / len(tiles), 4) if tiles else 0,
+            'hard_negative_note': ('`hard_negative_tiles` cuenta las teselas sin ninguna clase que '
+                                   'caen en una zona marcada como difícil, que es la definición de '
+                                   'negativo difícil y el número a comparar con el objetivo del '
+                                   '20-30 %. `tiles_touching_hard_negative` incluye además las que '
+                                   'rozan una zona marcada pero sí tienen camino.'),
             'note': ('Solo entran teselas cuya superficie revisada llega al umbral. Lo no '
                      'revisado sale como {} y se excluye de la pérdida.'.format(
                          models.IGNORE_INDEX)),
