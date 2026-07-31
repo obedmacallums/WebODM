@@ -30,6 +30,13 @@ export const REVIEW_DASH = '10 6';
 export const REVIEW_HARD_FILL_OPACITY = 0.18;
 export const REVIEW_FILL_OPACITY = 0.05;
 
+// Nodos que marcan los vértices de lo seleccionado **sin** ser manejadores: no se arrastran. Con
+// varias etiquetas a la vez no hay una geometría que editar, pero ver los vértices sigue diciendo
+// qué se ha cogido, que es para lo que sirven. Llevan clase propia —sin `cursor: move`— para no
+// prometer un arrastre que no existe.
+export const READONLY_VERTEX_CLASS = 'training-vertex-marker training-vertex-marker--readonly';
+export const VERTEX_ICON_SIZE = 10;
+
 /** Metros de terreno que mide un píxel de pantalla al zoom actual, en esa latitud. */
 export function metersPerPixel(map, lat){
   const zoom = map.getZoom();
@@ -88,6 +95,8 @@ export function createLabelLayer(map, options = {}){
   let current = [];
   let classes = [];
   let selectedIds = [];
+  let showVertices = false;
+  const vertexMarkers = [];
 
   function styleFor(label){
     const selected = selectedIds.indexOf(label.id) !== -1;
@@ -127,7 +136,26 @@ export function createLabelLayer(map, options = {}){
     };
   }
 
+  function clearVertexMarkers(){
+    while (vertexMarkers.length) map.removeLayer(vertexMarkers.pop());
+  }
+
+  /** Nodos de los vértices de una etiqueta seleccionada, sin interacción. */
+  function drawVertexMarkers(label){
+    if (!Lib.marker || !Lib.divIcon) return;
+    const icon = Lib.divIcon({className: READONLY_VERTEX_CLASS,
+                              iconSize: [VERTEX_ICON_SIZE, VERTEX_ICON_SIZE]});
+    toLatLngs(label.geometry).forEach(latlng => {
+      // `interactive: false` es lo que impide que el nodo se coma el clic destinado al polígono:
+      // con él activo, volver a clicar una etiqueta seleccionada no la deseleccionaría.
+      const marker = Lib.marker(latlng, {icon: icon, interactive: false});
+      marker.addTo(map);
+      vertexMarkers.push(marker);
+    });
+  }
+
   function draw(){
+    clearVertexMarkers();
     group.clearLayers();
     sortByOrder(current).forEach(label => {
       const latlngs = toLatLngs(label.geometry);
@@ -136,6 +164,7 @@ export function createLabelLayer(map, options = {}){
         ? Lib.polyline(latlngs, styleFor(label))
         : Lib.polygon(latlngs, styleFor(label));
       layer.labelId = label.id;
+      if (showVertices && selectedIds.indexOf(label.id) !== -1) drawVertexMarkers(label);
       // El hit-test lo hace Leaflet, que ya sabe si un punto cae dentro de un polígono o sobre
       // una polilínea de grosor dado. Reimplementarlo aquí habría sido código propio para
       // resolver algo que la librería resuelve mejor.
@@ -157,14 +186,21 @@ export function createLabelLayer(map, options = {}){
     setClasses(next){ classes = next || []; draw(); },
     setLabels(next){ current = next || []; draw(); },
     getLabels(){ return current; },
-    /** `ids` es una lista: la selección puede ser de varias etiquetas (Shift + clic). */
-    setSelected(ids){
+    /**
+     * `ids` es una lista: la selección puede ser de varias etiquetas (Shift + clic).
+     *
+     * `showVertices` lo decide quien llama, no esta capa: cuando el editor está trabajando sobre
+     * una sola etiqueta ya pone sus propios manejadores —esos sí arrastrables— y duplicarlos
+     * dejaría dos nodos por vértice, uno de ellos falso.
+     */
+    setSelected(ids, {showVertices: withVertices = false} = {}){
       const next = ids ? (Array.isArray(ids) ? ids.slice() : [ids]) : [];
       // La comparación evita repintar la capa entera en cada clic que no cambia nada. Con cientos
       // de etiquetas, redibujar por gusto se nota.
-      if (next.length === selectedIds.length &&
+      if (withVertices === showVertices && next.length === selectedIds.length &&
           next.every((id, i) => id === selectedIds[i])) return;
       selectedIds = next;
+      showVertices = withVertices;
       draw();
     },
     getSelected(){ return selectedIds.slice(); },
@@ -174,6 +210,7 @@ export function createLabelLayer(map, options = {}){
     redraw: draw,
     remove(){
       map.off('zoomend', onZoom);
+      clearVertexMarkers();
       group.clearLayers();
       map.removeLayer(group);
     }

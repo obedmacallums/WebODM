@@ -4,7 +4,8 @@
  * de más — sin deshacer. Así que lo que se fija aquí son las reglas exactas: qué hace Shift, qué
  * hace un clic normal, y qué pasa con una selección cuyas etiquetas han desaparecido.
  */
-const {setupDom, loadModule, createMap, stubLayers, test, assert, summary} = require('./harness');
+const {setupDom, loadModule, createMap, drawnOn, stubLayers, test, assert, summary} =
+  require('./harness');
 
 setupDom();
 const RealL = require('leaflet');
@@ -185,6 +186,91 @@ test('el clic entrega el evento para que el panel pueda leer Shift', () => {
   assert(seen.length === 1, 'el clic llega al panel');
   assert(selection.isAdditive(seen[0].event) === true, 'y con la mayúscula intacta');
   layer.remove();
+});
+
+// --- Nodos de vértice sobre lo seleccionado ------------------------------------------------
+
+test('con varias seleccionadas se marcan sus vértices', () => {
+  // Los nodos blancos del editor solo salen con una etiqueta, porque son manejadores. Con varias
+  // no hay nada que arrastrar, pero ver los vértices sigue diciendo qué se ha cogido.
+  const map = createMap(RealL);
+  const layer = labelLayerModule.createLabelLayer(map, {L});
+  layer.setClasses(classes);
+  layer.setLabels(labels(3));
+
+  layer.setSelected(['l0', 'l2'], {showVertices: true});
+  const markers = drawnOn(map, l => l.options && l.options.icon &&
+    l.options.icon.options.className === labelLayerModule.READONLY_VERTEX_CLASS);
+
+  assert(markers.length === 6, 'tres vértices por cada una de las dos seleccionadas');
+  layer.remove();
+});
+
+test('los nodos marcados no se comen el clic del polígono', () => {
+  // Con `interactive: true`, volver a clicar una etiqueta seleccionada acertaría en el nodo y no
+  // en el polígono, así que Shift + clic no podría deseleccionarla.
+  const map = createMap(RealL);
+  const layer = labelLayerModule.createLabelLayer(map, {L});
+  layer.setClasses(classes);
+  layer.setLabels(labels(1));
+
+  layer.setSelected(['l0'], {showVertices: true});
+  const markers = drawnOn(map, l => l.options && l.options.icon);
+  assert(markers.length > 0, 'hay nodos que comprobar');
+  assert(markers.every(m => m.options.interactive === false), 'ninguno intercepta clics');
+  layer.remove();
+});
+
+test('sin pedirlos no se pintan nodos', () => {
+  // Es el caso de una sola etiqueta: los pone el editor, y duplicarlos dejaría dos nodos por
+  // vértice, uno de ellos falso.
+  const map = createMap(RealL);
+  const layer = labelLayerModule.createLabelLayer(map, {L});
+  layer.setClasses(classes);
+  layer.setLabels(labels(2));
+
+  layer.setSelected(['l0']);
+  assert(drawnOn(map, l => l.options && l.options.icon).length === 0);
+  layer.remove();
+});
+
+test('los nodos desaparecen al deseleccionar', () => {
+  const map = createMap(RealL);
+  const layer = labelLayerModule.createLabelLayer(map, {L});
+  layer.setClasses(classes);
+  layer.setLabels(labels(2));
+
+  layer.setSelected(['l0', 'l1'], {showVertices: true});
+  layer.setSelected([], {showVertices: false});
+  assert(drawnOn(map, l => l.options && l.options.icon).length === 0,
+         'un nodo huérfano sobre el mapa apunta a una selección que ya no existe');
+  layer.remove();
+});
+
+test('cambiar solo showVertices repinta', () => {
+  // La comparación que evita repintados inútiles tiene que mirar también esta bandera, o pasar de
+  // una etiqueta a dos dejaría la capa sin nodos.
+  const map = createMap(RealL);
+  const layer = labelLayerModule.createLabelLayer(map, {L});
+  layer.setClasses(classes);
+  layer.setLabels(labels(2));
+
+  layer.setSelected(['l0']);
+  layer.setSelected(['l0'], {showVertices: true});
+  assert(drawnOn(map, l => l.options && l.options.icon).length === 3);
+  layer.remove();
+});
+
+test('quitar la capa se lleva los nodos', () => {
+  const map = createMap(RealL);
+  const layer = labelLayerModule.createLabelLayer(map, {L});
+  layer.setClasses(classes);
+  layer.setLabels(labels(1));
+  layer.setSelected(['l0'], {showVertices: true});
+  layer.remove();
+
+  assert(drawnOn(map, l => l.options && l.options.icon).length === 0,
+         'al cerrar el panel no puede quedar un nodo suelto sobre el mapa');
 });
 
 // --- El orden entre soltar la edición y repintar -------------------------------------------

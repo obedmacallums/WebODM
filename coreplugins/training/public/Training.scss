@@ -42,6 +42,17 @@
   cursor: move;
 }
 
+// Nodo de vértice de una etiqueta seleccionada entre varias: marca dónde están los vértices, pero
+// no se arrastra. Va más pequeño y sin `cursor: move` a propósito — un nodo idéntico al editable
+// prometería un arrastre que con selección múltiple no existe, y el usuario tiraría de él.
+.training-vertex-marker--readonly{
+  width: 7px;
+  height: 7px;
+  border-width: 1px;
+  opacity: 0.75;
+  cursor: default;
+}
+
 .leaflet-control-training .training-panel{
   // `fixed` con `bottom` fijo, no un panel que crece hacia abajo: la esquina inferior del mapa la
   // ocupan los controles del core (compartir, 3D, la foto y la atribución de Google), y un panel

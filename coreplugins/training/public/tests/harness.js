@@ -74,7 +74,25 @@ function createMap(L, {width = 800, height = 600, center = [-33.35, -70.71], zoo
   document.body.appendChild(el);
   Object.defineProperty(el, 'clientWidth', {value: width});
   Object.defineProperty(el, 'clientHeight', {value: height});
-  return L.map(el, {fadeAnimation: false, zoomAnimation: false}).setView(center, zoom);
+  const map = L.map(el, {fadeAnimation: false, zoomAnimation: false}).setView(center, zoom);
+
+  // `map.fakeLayers` lleva la cuenta de lo que los dobles han puesto encima. Leaflet real ignora
+  // una capa que no reconoce —`removeLayer` sale por la puerta de atrás—, así que la baja hay que
+  // llevarla aquí o el registro solo crecería y un test vería marcadores ya retirados.
+  const removeLayer = map.removeLayer.bind(map);
+  map.removeLayer = layer => {
+    if (map.fakeLayers){
+      const at = map.fakeLayers.indexOf(layer);
+      if (at !== -1) map.fakeLayers.splice(at, 1);
+    }
+    return removeLayer(layer);
+  };
+  return map;
+}
+
+/** Las capas que los dobles han puesto sobre el mapa, filtradas por un predicado. */
+function drawnOn(map, predicate){
+  return (map.fakeLayers || []).filter(predicate || (() => true));
 }
 
 /**
@@ -105,7 +123,22 @@ function stubLayers(L){
         .forEach(fn => fn(Object.assign({target: this, originalEvent: {}}, data)));
       return this;
     }
-    addTo(map){ this._map = map; return this; }
+    /**
+     * Añadirse al mapa **queda registrado en `map.fakeLayers`**.
+     *
+     * El mapa es Leaflet de verdad y estas capas no lo son, así que él no las apunta en ningún
+     * sitio: sin este registro no habría forma de comprobar qué se ha dibujado sobre el mapa, y
+     * los marcadores —que no cuelgan de ningún `LayerGroup`— quedarían fuera del alcance de los
+     * tests. `createMap` completa el otro lado, quitándolos al retirarlos.
+     */
+    addTo(map){
+      this._map = map;
+      if (map){
+        if (!map.fakeLayers) map.fakeLayers = [];
+        map.fakeLayers.push(this);
+      }
+      return this;
+    }
   }
 
   class FakePath extends FakeEvented {
@@ -234,4 +267,6 @@ function summary(label){
   });
 }
 
-module.exports = {setupDom, loadModule, createMap, stubLayers, test, assert, assertClose, summary};
+module.exports = {
+  setupDom, loadModule, createMap, drawnOn, stubLayers, test, assert, assertClose, summary
+};

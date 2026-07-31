@@ -178,9 +178,13 @@ export default class TrainingPanel extends React.Component {
     // vértices del nuevo.
     if (this.editor) this.editor.stopEditing();
 
+    // Los nodos los pinta la capa solo cuando el editor no va a poner los suyos, que son los
+    // arrastrables. Con varias etiquetas no hay edición posible, pero ver los vértices sigue
+    // diciendo qué se ha cogido.
+    const editable = canEditVertices(selectedIds);
     this.setState({selectedIds});
-    if (this.layer) this.layer.setSelected(selectedIds);
-    if (!this.editor || !canEditVertices(selectedIds)) return;
+    if (this.layer) this.layer.setSelected(selectedIds, {showVertices: !editable});
+    if (!this.editor || !editable) return;
 
     const only = selectedIds[0];
     // El estilo cambia al seleccionar, así que la capa se redibuja: hay que pedir la nueva, no
@@ -193,7 +197,7 @@ export default class TrainingPanel extends React.Component {
 
   clearSelection = () => {
     if (this.editor) this.editor.stopEditing();
-    if (this.layer) this.layer.setSelected([]);
+    if (this.layer) this.layer.setSelected([], {showVertices: false});
     this.setState({selectedIds: []});
   };
 
