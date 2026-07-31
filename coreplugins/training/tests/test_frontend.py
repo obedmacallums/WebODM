@@ -41,6 +41,9 @@ class FrontendUnitTest(SimpleTestCase):
     def test_reviewed_areas_are_not_class_zero(self):
         self._run_js('reviewArea.test.js')
 
+    def test_the_delete_key_only_fires_when_it_is_safe(self):
+        self._run_js('deleteShortcut.test.js')
+
     def test_label_editor_draws_polygons_strokes_and_erasures(self):
         self._run_js('labelEditor.test.js')
 

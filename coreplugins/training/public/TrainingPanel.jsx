@@ -6,6 +6,7 @@ import LabelEditor, { MODE_NONE, MODE_POLYGON, MODE_BRUSH, MODE_ERASER, MODE_REV
   from './LabelEditor';
 import { createLabelLayer } from './labelLayer';
 import { shouldRebuildEditor } from './panelLifecycle';
+import { shouldDeleteSelected } from './deleteShortcut';
 
 /**
  * Panel de etiquetado sobre el mapa de una tarea (D1).
@@ -49,6 +50,10 @@ export default class TrainingPanel extends React.Component {
 
   componentDidMount(){
     if (this.props.isShowed) this.loadDatasets();
+    // El atajo lo lleva el panel y no el editor porque la selección es suya. Va en `document` para
+    // que funcione con el foco en el mapa, que es donde está después de clicar una etiqueta;
+    // `shouldDeleteSelected` se encarga de que eso no lo convierta en un peligro.
+    document.addEventListener('keydown', this.onKeyDown);
   }
 
   componentDidUpdate(prevProps, prevState){
@@ -67,8 +72,23 @@ export default class TrainingPanel extends React.Component {
   }
 
   componentWillUnmount(){
+    document.removeEventListener('keydown', this.onKeyDown);
     this.teardownEditor();
   }
+
+  onKeyDown = (e) => {
+    if (!shouldDeleteSelected(e, {
+      isShowed: this.props.isShowed,
+      hasSelection: !!this.state.selectedId,
+      isDrawing: !!this.editor && this.editor.isActive(),
+      activeElement: document.activeElement
+    })) return;
+
+    // `Backspace` fuera de un campo de texto todavía navega hacia atrás en algunos navegadores, y
+    // perder la página entera por borrar un polígono sería un mal negocio.
+    e.preventDefault();
+    this.deleteSelected();
+  };
 
   task(){ return this.props.tasks[0]; }
 
@@ -406,6 +426,8 @@ export default class TrainingPanel extends React.Component {
           </div>
           <div className="hint">
             {_("Drag a vertex to move it, click the outline to add one, right click a vertex to remove it.")}
+            {' '}
+            {_("Press Del or Backspace to delete the whole label.")}
           </div>
           <div className="selection-actions">
             <button type="button" className="btn btn-xs btn-default"
@@ -413,7 +435,8 @@ export default class TrainingPanel extends React.Component {
                     title={_("Assign it to the class selected above.")}>
               <i className="fa fa-tag"/> {_("Reassign")}
             </button>
-            <button type="button" className="btn btn-xs btn-danger" onClick={this.deleteSelected}>
+            <button type="button" className="btn btn-xs btn-danger" onClick={this.deleteSelected}
+                    title={_("Del or Backspace")}>
               <i className="fa fa-trash"/> {_("Delete")}
             </button>
             <button type="button" className="btn btn-xs btn-default" onClick={this.clearSelection}>
