@@ -386,9 +386,9 @@ resumen, y comprobar que avisa de ello antes de dejar exportar.
 - **SC-005**: Las etiquetas sobreviven a recargas de página, a reinicios del contenedor y al borrado
   de una de las tareas del dataset.
 - **SC-006**: Un dataset sobre las 5 tareas actuales del usuario produce del orden de **cientos** de
-  teselas de 512 px a 10 cm/px, y no decenas. Derivado de dos cifras medidas —3612 teselas a
-  resolución nativa y 172 a 21 cm/px— por la ley del cuadrado inverso: unas **758** a 10 cm/px. La
-  cifra exacta debe remedirse durante la implementación.
+  teselas de 512 px a 10 cm/px, y no decenas. **Medido: 912 teselas** sobre la rejilla completa de
+  las cinco ortofotos (frente a 227 a 21 cm/px, insuficientes). Una sola tarea —la de la mina, de
+  1087 × 1402 m— aporta **616** de esas 912, así que un dataset de una única tarea ya es viable.
 - **SC-007**: Exportar un dataset de varios cientos de teselas no bloquea la interfaz ni agota la
   memoria del servidor: el usuario puede seguir trabajando mientras se genera.
 - **SC-008**: Un usuario que ha etiquetado solo una clase es advertido antes de exportar, no después
