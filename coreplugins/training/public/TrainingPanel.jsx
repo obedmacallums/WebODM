@@ -7,6 +7,8 @@ import LabelEditor, { MODE_NONE, MODE_POLYGON, MODE_BRUSH, MODE_ERASER, MODE_REV
 import { createLabelLayer } from './labelLayer';
 import { shouldRebuildEditor } from './panelLifecycle';
 import { shouldDeleteSelected } from './deleteShortcut';
+import { canEditVertices, isAdditive, nextSelection, pruneSelection, sameSelection,
+         selectedLabels } from './selection';
 
 /**
  * Panel de etiquetado sobre el mapa de una tarea (D1).
@@ -44,7 +46,7 @@ export default class TrainingPanel extends React.Component {
       labels: [],
       saving: false,
       exports: [],
-      selectedId: null
+      selectedIds: []
     };
   }
 
@@ -79,7 +81,7 @@ export default class TrainingPanel extends React.Component {
   onKeyDown = (e) => {
     if (!shouldDeleteSelected(e, {
       isShowed: this.props.isShowed,
-      hasSelection: !!this.state.selectedId,
+      hasSelection: this.state.selectedIds.length > 0,
       isDrawing: !!this.editor && this.editor.isActive(),
       activeElement: document.activeElement
     })) return;
@@ -153,29 +155,50 @@ export default class TrainingPanel extends React.Component {
    * Solo selecciona cuando no se está dibujando: durante un trazado, un clic sobre una etiqueta
    * existente es un vértice más, no un intento de seleccionarla.
    */
-  selectLabel = (label, layer) => {
+  selectLabel = (label, layer, event) => {
     if (this.editor && this.editor.isActive()) return;
 
-    this.setState({selectedId: label.id});
-    if (this.layer) this.layer.setSelected(label.id);
+    const selectedIds = nextSelection(this.state.selectedIds, label.id, isAdditive(event));
+    this.applySelection(selectedIds, layer);
+  };
+
+  /**
+   * Aplica una selección: la pinta y decide si hay edición de vértices.
+   *
+   * Los vértices solo se editan con **una** etiqueta seleccionada. Con varias no hay una geometría
+   * que arrastrar, y dejar los manejadores de la primera sobre el mapa haría creer que se está
+   * editando el conjunto.
+   */
+  applySelection(selectedIds, fallbackLayer){
+    // **La edición se suelta antes de repintar, y el orden no es negociable.** Repintar la capa la
+    // retira del mapa, y la capa que se está editando lleva un manejador de `remove` que llama a
+    // `onStop`, o sea a `applySelection([])`. Con el orden inverso, seleccionar un polígono
+    // mientras se editaba otro entraba aquí de forma reentrante y dejaba la selección recién
+    // puesta a cero: el panel se quedaba sin cuadro de selección mientras el mapa mostraba los
+    // vértices del nuevo.
+    if (this.editor) this.editor.stopEditing();
+
+    this.setState({selectedIds});
+    if (this.layer) this.layer.setSelected(selectedIds);
+    if (!this.editor || !canEditVertices(selectedIds)) return;
+
+    const only = selectedIds[0];
     // El estilo cambia al seleccionar, así que la capa se redibuja: hay que pedir la nueva, no
     // la que llegó en el evento, o los manejadores de vértices quedarían sobre una capa muerta.
-    if (this.editor) {
-      this.editor.startEditing(this.layer.layerFor(label.id) || layer, {
-        onChange: ring => this.saveGeometry(label.id, ring),
-        onStop: () => this.setState({selectedId: null})
-      });
-    }
-  };
+    this.editor.startEditing((this.layer && this.layer.layerFor(only)) || fallbackLayer, {
+      onChange: ring => this.saveGeometry(only, ring),
+      onStop: () => this.applySelection([])
+    });
+  }
 
   clearSelection = () => {
     if (this.editor) this.editor.stopEditing();
-    if (this.layer) this.layer.setSelected(null);
-    this.setState({selectedId: null});
+    if (this.layer) this.layer.setSelected([]);
+    this.setState({selectedIds: []});
   };
 
-  selectedLabel(){
-    return this.state.labels.find(l => l.id === this.state.selectedId) || null;
+  selectedLabels(){
+    return selectedLabels(this.state.selectedIds, this.state.labels);
   }
 
   /** Persiste la geometría tras mover, insertar o borrar un vértice. */
@@ -186,8 +209,7 @@ export default class TrainingPanel extends React.Component {
       .done(saved => {
         // Se guarda lo que devuelve el servidor: viene ya simplificado (FR-015), así que la
         // geometría local y la almacenada no divergen tras el primer arrastre.
-        const labels = this.state.labels.map(l => l.id === labelId ? saved : l);
-        this.setState({labels});
+        this.setState(prev => ({labels: prev.labels.map(l => l.id === labelId ? saved : l)}));
       })
       .fail(xhr => this.setState({
         error: (xhr.responseJSON && xhr.responseJSON.error) || _("Could not save the change.")
@@ -195,25 +217,28 @@ export default class TrainingPanel extends React.Component {
   };
 
   deleteSelected = () => {
-    const selected = this.selectedLabel();
-    if (!selected) return;
+    const chosen = this.selectedLabels();
+    if (!chosen.length) return;
     this.clearSelection();
-    this.deleteLabel(selected.id);
+    chosen.forEach(label => this.deleteLabel(label.id));
   };
 
-  /** Reasigna la etiqueta seleccionada a la clase activa. */
+  /**
+   * Reasigna a la clase activa las etiquetas seleccionadas que admiten clase.
+   *
+   * Las áreas revisadas se saltan: no dicen qué hay, dicen que alguien lo miró, y el backend les
+   * fuerza `class_index: null`. Mandarlas igual habría sido una petición que no cambia nada.
+   */
   reassignSelected = () => {
-    const selected = this.selectedLabel();
-    if (!selected) return;
-
-    $.ajax({url: this.labelsUrl(selected.id), type: 'PATCH', contentType: 'application/json',
-            data: JSON.stringify({class_index: this.state.classIndex})})
-      .done(saved => {
-        const labels = this.state.labels.map(l => l.id === saved.id ? saved : l);
-        this.setState({labels});
-        if (this.layer) this.layer.setLabels(labels);
-      })
-      .fail(() => this.setState({error: _("Could not change the class.")}));
+    this.selectedLabels()
+      .filter(label => label.kind !== 'review')
+      .forEach(label => {
+        $.ajax({url: this.labelsUrl(label.id), type: 'PATCH', contentType: 'application/json',
+                data: JSON.stringify({class_index: this.state.classIndex})})
+          .done(saved => this.replaceLabels(
+            labels => labels.map(l => l.id === saved.id ? saved : l)))
+          .fail(() => this.setState({error: _("Could not change the class.")}));
+      });
   };
 
   loadLabels = () => {
@@ -222,10 +247,10 @@ export default class TrainingPanel extends React.Component {
       .done(labels => {
         this.setState({labels: labels || []});
         if (this.layer) this.layer.setLabels(labels || []);
-        // Una selección que ya no existe se suelta: dejarla apuntaría a una etiqueta ausente y
-        // el botón de borrar no haría nada sin decir por qué.
-        if (this.state.selectedId &&
-            !(labels || []).some(l => l.id === this.state.selectedId)) this.clearSelection();
+        // Las selecciones que ya no existen se sueltan: dejarlas apuntaría a etiquetas ausentes
+        // y el botón de borrar no haría nada sin decir por qué.
+        const alive = pruneSelection(this.state.selectedIds, labels);
+        if (!sameSelection(alive, this.state.selectedIds)) this.applySelection(alive);
       })
       .fail(() => this.setState({error: _("Could not load labels.")}));
   };
@@ -276,9 +301,8 @@ export default class TrainingPanel extends React.Component {
       .done(saved => {
         // Se añade el que devuelve el servidor y no el local: trae el `order` definitivo, que es
         // lo que decide quién gana en las zonas solapadas (FR-012), y la geometría ya simplificada.
-        const labels = this.state.labels.concat([saved]);
-        this.setState({labels, saving: false});
-        if (this.layer) this.layer.setLabels(labels);
+        this.replaceLabels(labels => labels.concat([saved]));
+        this.setState({saving: false});
       })
       .fail(xhr => this.setState({
         saving: false,
@@ -286,13 +310,23 @@ export default class TrainingPanel extends React.Component {
       }));
   };
 
+  /**
+   * Reemplaza la lista de etiquetas y repinta la capa.
+   *
+   * `updater` recibe la lista **anterior**, no `this.state.labels`, y eso es lo que hace correcto
+   * el borrado múltiple: con varias peticiones en vuelo, cada callback leyendo `this.state`
+   * directamente vería la lista de antes de las otras y la última respuesta pisaría a las demás.
+   * Borrar cinco polígonos habría borrado uno.
+   */
+  replaceLabels(updater){
+    this.setState(
+      prev => ({labels: updater(prev.labels)}),
+      () => { if (this.layer) this.layer.setLabels(this.state.labels); });
+  }
+
   deleteLabel = (labelId) => {
     $.ajax({url: this.labelsUrl(labelId), type: 'DELETE'})
-      .done(() => {
-        const labels = this.state.labels.filter(l => l.id !== labelId);
-        this.setState({labels});
-        if (this.layer) this.layer.setLabels(labels);
-      })
+      .done(() => this.replaceLabels(labels => labels.filter(l => l.id !== labelId)))
       .fail(() => this.setState({error: _("Could not delete the label.")}));
   };
 
@@ -331,7 +365,9 @@ export default class TrainingPanel extends React.Component {
 
     const { datasets, datasetId, classIndex, mode, widthM, hardNegative,
             labels, loading, exports } = this.state;
-    const selected = this.selectedLabel();
+    const chosen = this.selectedLabels();
+    const selected = chosen.length === 1 ? chosen[0] : null;
+    const reassignable = chosen.filter(l => l.kind !== 'review').length;
     const running = exports.find(e => e.status === 'running');
     const ready = exports.filter(e => e.status === 'completed');
     const dataset = this.dataset();
@@ -412,32 +448,42 @@ export default class TrainingPanel extends React.Component {
         {/* Seleccionar es lo que permite corregir en vez de volver a empezar (FR-013): se hace
             clicando la etiqueta en el mapa, y por eso el modo no necesita botón propio — basta
             con no estar dibujando. */}
-        {!!selected && <div className="row-field selection">
+        {!!chosen.length && <div className="row-field selection">
           <div className="selection-title">
-            {_("Selected")}: {
-              selected.kind === 'stroke' ? _("centreline")
-                : (selected.kind === 'review' ? _("reviewed area") : _("polygon"))}
-            {' · '}
-            {selected.kind === 'review'
-              ? (selected.hard_negative ? _("hard negative") : _("checked ground"))
-              : (selected.class_index === null
-                  ? _("ignore (255)")
-                  : (dataset.classes.find(c => c.index === selected.class_index) || {}).name)}
+            {selected
+              ? <span>
+                  {_("Selected")}: {
+                    selected.kind === 'stroke' ? _("centreline")
+                      : (selected.kind === 'review' ? _("reviewed area") : _("polygon"))}
+                  {' · '}
+                  {selected.kind === 'review'
+                    ? (selected.hard_negative ? _("hard negative") : _("checked ground"))
+                    : (selected.class_index === null
+                        ? _("ignore (255)")
+                        : (dataset.classes.find(c => c.index === selected.class_index) || {}).name)}
+                </span>
+              : <span>{chosen.length} {_("labels selected")}</span>}
           </div>
           <div className="hint">
-            {_("Drag a vertex to move it, click the outline to add one, right click a vertex to remove it.")}
+            {/* Los vértices solo se editan con una etiqueta: con varias no hay una geometría que
+                arrastrar, así que el consejo cambia en vez de mentir. */}
+            {selected
+              ? _("Drag a vertex to move it, click the outline to add one, right click a vertex to remove it.")
+              : _("Vertex editing needs a single label. Shift-click to add or remove labels from the selection.")}
             {' '}
-            {_("Press Del or Backspace to delete the whole label.")}
+            {_("Press Del or Backspace to delete.")}
           </div>
           <div className="selection-actions">
-            <button type="button" className="btn btn-xs btn-default"
+            {!!reassignable && <button type="button" className="btn btn-xs btn-default"
                     onClick={this.reassignSelected}
-                    title={_("Assign it to the class selected above.")}>
+                    title={_("Assign to the class selected above.")}>
               <i className="fa fa-tag"/> {_("Reassign")}
-            </button>
+              {reassignable !== chosen.length ? ' (' + reassignable + ')' : ''}
+            </button>}
             <button type="button" className="btn btn-xs btn-danger" onClick={this.deleteSelected}
                     title={_("Del or Backspace")}>
               <i className="fa fa-trash"/> {_("Delete")}
+              {chosen.length > 1 ? ' (' + chosen.length + ')' : ''}
             </button>
             <button type="button" className="btn btn-xs btn-default" onClick={this.clearSelection}>
               {_("Deselect")}
@@ -445,9 +491,9 @@ export default class TrainingPanel extends React.Component {
           </div>
         </div>}
 
-        {!selected && mode === MODE_NONE && !!labels.length &&
+        {!chosen.length && mode === MODE_NONE && !!labels.length &&
           <div className="row-field hint">
-            {_("Click a label on the map to edit or delete it.")}
+            {_("Click a label on the map to edit or delete it. Shift-click to select several.")}
           </div>}
 
         {!labels.some(l => l.kind === 'review') && !!datasetId &&

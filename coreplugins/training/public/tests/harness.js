@@ -149,8 +149,27 @@ function stubLayers(L){
   class FakeLayerGroup extends FakeEvented {
     constructor(){ super(); this._layers = []; }
     addLayer(layer){ this._layers.push(layer); return this; }
-    clearLayers(){ this._layers = []; return this; }
     getLayers(){ return this._layers; }
+
+    /**
+     * Quitar una capa **dispara `remove` en ella**, igual que Leaflet real.
+     *
+     * No es un detalle: el editor engancha `remove` en la capa que está editando para no dejar
+     * manejadores de vértice flotando, y de ese manejador cuelga `onStop`. Un doble que se limitara
+     * a vaciar el array sería más silencioso que la librería y dejaría pasar justo los fallos de
+     * orden entre repintar y soltar la edición — que es un fallo que ya se coló una vez.
+     */
+    removeLayer(layer){
+      const at = this._layers.indexOf(layer);
+      if (at !== -1) this._layers.splice(at, 1);
+      if (layer && layer.fire) layer.fire('remove');
+      return this;
+    }
+
+    clearLayers(){
+      this._layers.slice().forEach(layer => this.removeLayer(layer));
+      return this;
+    }
   }
 
   return Object.assign(Object.create(L), {

@@ -87,10 +87,10 @@ export function createLabelLayer(map, options = {}){
   const onSelect = options.onSelect || function(){};
   let current = [];
   let classes = [];
-  let selectedId = null;
+  let selectedIds = [];
 
   function styleFor(label){
-    const selected = label.id === selectedId;
+    const selected = selectedIds.indexOf(label.id) !== -1;
 
     if (label.kind === 'review'){
       return {
@@ -157,12 +157,17 @@ export function createLabelLayer(map, options = {}){
     setClasses(next){ classes = next || []; draw(); },
     setLabels(next){ current = next || []; draw(); },
     getLabels(){ return current; },
-    setSelected(labelId){
-      if (selectedId === labelId) return;
-      selectedId = labelId;
+    /** `ids` es una lista: la selección puede ser de varias etiquetas (Shift + clic). */
+    setSelected(ids){
+      const next = ids ? (Array.isArray(ids) ? ids.slice() : [ids]) : [];
+      // La comparación evita repintar la capa entera en cada clic que no cambia nada. Con cientos
+      // de etiquetas, redibujar por gusto se nota.
+      if (next.length === selectedIds.length &&
+          next.every((id, i) => id === selectedIds[i])) return;
+      selectedIds = next;
       draw();
     },
-    getSelected(){ return selectedId; },
+    getSelected(){ return selectedIds.slice(); },
     layerFor(labelId){
       return group.getLayers().find(l => l.labelId === labelId) || null;
     },
