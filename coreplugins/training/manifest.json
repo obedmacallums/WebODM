@@ -1,0 +1,13 @@
+{
+	"name": "Training",
+	"webodmMinVersion": "3.2.5",
+	"description": "Label orthophotos with polygons and a ground-referenced brush, and export segmentation training datasets (tiles, masks and manifest) for training outside WebODM",
+	"version": "1.0.0",
+	"author": "Obed Macallums",
+	"email": "obedmacallums@gmail.com",
+	"repository": "https://github.com/OpenDroneMap/WebODM",
+	"tags": ["training", "dataset", "segmentation", "labeling", "onnx"],
+	"homepage": "https://github.com/OpenDroneMap/WebODM",
+	"experimental": false,
+	"deprecated": false
+}

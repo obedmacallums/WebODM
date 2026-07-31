@@ -1,0 +1,199 @@
+.leaflet-control-training{
+  position: relative;
+  // Mismo nivel base que el resto de controles de plugin (contours, viewshed, objdetect, realign,
+  // annotations, road): sin `!important` el z-index:800 del CSS de Leaflet lo pisa y el panel
+  // queda por debajo. Quién manda con un panel abierto lo decide `panelStacking.js`.
+  z-index: 999 !important;
+
+  a.leaflet-control-training-button{
+    background: url(icon.svg) no-repeat 0 0;
+    background-size: 26px 26px;
+    border-radius: 2px;
+  }
+
+  div.training-panel{ display: none; }
+
+  .open{
+    a.leaflet-control-training-button{
+      display: none;
+    }
+
+    div.training-panel{
+      display: block;
+    }
+  }
+}
+
+.leaflet-touch .leaflet-control-training a{
+  background-position: 2px 2px;
+}
+
+// Los manejadores de vértices son marcadores del mapa, no hijos del control, así que su regla no
+// puede colgar de `.leaflet-control-training`. Mismo estilo que `annotations` para que arrastrar
+// un vértice se sienta igual en los dos plugins; el borde va en azul y no en el naranja de
+// `annotations` para no dar a entender que es su editor.
+.training-vertex-marker{
+  width: 10px;
+  height: 10px;
+  background: #fff;
+  border: 2px solid #1f78ff;
+  border-radius: 50%;
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
+  cursor: move;
+}
+
+.leaflet-control-training .training-panel{
+  // `fixed` con `bottom` fijo, no un panel que crece hacia abajo: la esquina inferior del mapa la
+  // ocupan los controles del core (compartir, 3D, la foto y la atribución de Google), y un panel
+  // que llegue hasta ahí los tapa — o peor, deja sus propios botones medio escondidos detrás,
+  // que es justo lo que pasaba con las herramientas de dibujo.
+  position: fixed;
+  top: 108px;
+  right: 12px;
+  bottom: 84px;
+  overflow-y: auto;
+  // El panel se desplaza en vertical, nunca en lateral: un contenido que se pase de ancho debe
+  // envolverse, no esconderse detrás de una barra horizontal que el usuario no busca.
+  overflow-x: hidden;
+  z-index: 1000;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  padding: 6px 10px 6px 6px;
+  background: #fff;
+  min-width: 280px;
+  max-width: 340px;
+
+  // El core estiliza como botón de barra cualquier `a` que cuelgue de un control del mapa
+  // (`.leaflet-bar a { display:block; text-align:center; background-color:#fff !important }` y las
+  // reglas de tamaño de `.leaflet-touch`). Dentro de un panel eso descuadra todo, así que se
+  // deshace de una vez. `:hover` y `:focus` van incluidos porque el core repite las mismas
+  // propiedades ahí con la especificidad de la regla de reposo.
+  a, a:hover, a:focus{
+    display: inline;
+    width: auto !important;
+    height: auto !important;
+    line-height: inherit !important;
+    text-align: inherit;
+    background: transparent !important;
+    border: none;
+  }
+
+  a:not(.btn){
+    color: #3498db !important;
+    cursor: pointer;
+
+    &:hover, &:focus{
+      color: #18bc9c !important;
+      text-decoration: underline !important;
+    }
+  }
+
+  .title{
+    font-weight: bold;
+    padding: 2px 0 0 4px;
+  }
+
+  .close-button{
+    float: right;
+    cursor: pointer;
+    padding: 2px 4px;
+
+    &:before{
+      content: "\00d7";
+      font-size: 20px;
+      line-height: 14px;
+    }
+  }
+
+  .row-field{
+    margin-bottom: 8px;
+
+    label{
+      display: block;
+      font-size: 12px;
+      margin-bottom: 2px;
+      font-weight: normal;
+    }
+
+    select.form-control, input.form-control{
+      height: 28px;
+      padding: 2px 6px;
+    }
+
+    input[type="range"]{
+      width: 100%;
+      margin: 2px 0;
+    }
+  }
+
+  // Las tres herramientas en una rejilla: con `float` o `inline-block` la tercera se salía del
+  // ancho del panel y quedaba medio tapada.
+  .tools{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+
+    .btn{
+      flex: 1 1 auto;
+      min-width: 88px;
+      padding: 4px 6px;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+  }
+
+  .class-swatch{
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    margin-top: 4px;
+    border: 1px solid rgba(0, 0, 0, 0.2);
+    vertical-align: middle;
+  }
+
+  .hint{
+    font-size: 11px;
+    color: #888;
+    margin-top: 2px;
+    white-space: normal;
+  }
+
+  .selection{
+    border: 1px solid #ddd;
+    border-radius: 3px;
+    padding: 6px;
+    background: #fafafa;
+
+    .selection-title{
+      font-size: 12px;
+      font-weight: bold;
+      margin-bottom: 2px;
+    }
+
+    .selection-actions{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 6px;
+    }
+  }
+
+  .summary{
+    font-size: 12px;
+    color: #444;
+    border-top: 1px solid #eee;
+    padding-top: 6px;
+  }
+
+  .export-status{
+    font-size: 12px;
+    color: #444;
+  }
+
+  .no-datasets{
+    font-size: 12px;
+    color: #666;
+    padding: 4px 2px;
+    white-space: normal;
+  }
+}
