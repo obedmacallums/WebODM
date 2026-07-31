@@ -357,6 +357,25 @@ export default class TrainingPanel extends React.Component {
     if (this.editor) this.editor.setRadius(widthM / 2);
   };
 
+  /**
+   * Cambia la marca de negativo difícil de las áreas revisadas seleccionadas.
+   *
+   * Sin esto la casilla solo servía **antes** de dibujar, así que equivocarse obligaba a borrar el
+   * área y rehacerla. Es una marca contable, no geometría: cambiarla después tiene que ser barato.
+   */
+  setSelectedHardNegative = (e) => {
+    const hard_negative = e.target.checked;
+    this.selectedLabels()
+      .filter(label => label.kind === 'review')
+      .forEach(label => {
+        $.ajax({url: this.labelsUrl(label.id), type: 'PATCH', contentType: 'application/json',
+                data: JSON.stringify({hard_negative})})
+          .done(saved => this.replaceLabels(
+            labels => labels.map(l => l.id === saved.id ? saved : l)))
+          .fail(() => this.setState({error: _("Could not change the hard negative flag.")}));
+      });
+  };
+
   setHardNegative = (e) => {
     const hardNegative = e.target.checked;
     this.setState({hardNegative});
@@ -375,6 +394,8 @@ export default class TrainingPanel extends React.Component {
     const chosen = this.selectedLabels();
     const selected = chosen.length === 1 ? chosen[0] : null;
     const reassignable = chosen.filter(l => l.kind !== 'review').length;
+    const reviewChosen = chosen.filter(l => l.kind === 'review');
+    const allHardNegative = !!reviewChosen.length && reviewChosen.every(l => l.hard_negative);
     const running = exports.find(e => e.status === 'running');
     const ready = exports.filter(e => e.status === 'completed');
     const dataset = this.dataset();
@@ -480,6 +501,13 @@ export default class TrainingPanel extends React.Component {
             {' '}
             {_("Press Del or Backspace to delete.")}
           </div>
+          {!!reviewChosen.length && <label className="checkbox-inline selection-flag">
+            <input type="checkbox" checked={allHardNegative}
+                   onChange={this.setSelectedHardNegative}/>
+            {' '}{_("Hard negative")}
+            {reviewChosen.length > 1 ? ' (' + reviewChosen.length + ')' : ''}
+          </label>}
+
           <div className="selection-actions">
             {!!reassignable && <button type="button" className="btn btn-xs btn-default"
                     onClick={this.reassignSelected}

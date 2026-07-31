@@ -186,6 +186,74 @@ class LabelApiTest(TrainingTestBase):
         self.assertEqual(res.status_code, 404)
 
 
+class ReviewAreaApiTest(TrainingTestBase):
+    """Áreas revisadas y su marca de negativo difícil (FR-040, FR-043)."""
+
+    def setUp(self):
+        super().setUp()
+        self.task = self._task()
+        self.dataset = self._create_dataset(self.task)
+        self._login()
+
+    def _url(self, *extra):
+        return self._api('datasets', self.dataset['id'], 'tasks', self.task.id, 'labels', *extra)
+
+    def _create(self, **payload):
+        body = {'kind': 'review', 'geometry': square(0, 0, 10)}
+        body.update(payload)
+        return self.client.post(self._url(), body, format='json')
+
+    def test_a_review_area_never_carries_a_class(self):
+        """Ni aunque se mande una. Un área revisada no dice qué hay, dice que alguien lo miró; con
+        `class_index: 0` estaría afirmando «aquí no hay camino» sobre todo lo que cubre."""
+        res = self._create(class_index=0)
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertIsNone(res.data['class_index'])
+
+    def test_the_hard_negative_flag_is_stored(self):
+        res = self._create(hard_negative=True)
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertTrue(res.data['hard_negative'])
+
+    def test_the_flag_defaults_to_false_and_is_explicit(self):
+        """Explícito y no ausente: quien lee el paquete no tiene que distinguir `false` de «no
+        estaba el campo»."""
+        res = self._create()
+        self.assertIn('hard_negative', res.data)
+        self.assertFalse(res.data['hard_negative'])
+
+    def test_the_flag_can_be_changed_after_drawing(self):
+        """Es una marca contable, no geometría: equivocarse no puede obligar a rehacer el área."""
+        label_id = self._create().data['id']
+
+        res = self.client.patch(self._url(label_id), {'hard_negative': True}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertTrue(res.data['hard_negative'])
+
+        res = self.client.patch(self._url(label_id), {'hard_negative': False}, format='json')
+        self.assertFalse(res.data['hard_negative'])
+
+    def test_changing_the_geometry_keeps_the_flag(self):
+        label_id = self._create(hard_negative=True).data['id']
+
+        res = self.client.patch(self._url(label_id), {'geometry': square(2, 2, 6)}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertTrue(res.data['hard_negative'], 'mover un vértice no puede perder la marca')
+
+    def test_a_review_area_needs_three_vertices(self):
+        res = self._create(geometry=[[0, 0], [0.001, 0]])
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data['code'], 'bad_geometry')
+
+    def test_only_review_areas_carry_the_flag(self):
+        """Un polígono de clase no tiene por qué llevar un campo que no significa nada en él."""
+        res = self.client.post(self._url(), {'kind': 'polygon', 'class_index': 1,
+                                             'geometry': square(0, 0, 4), 'hard_negative': True},
+                               format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertNotIn('hard_negative', res.data)
+
+
 class BrushGeometryTest(TrainingTestBase):
     """El radio del pincel es una medida sobre el terreno (FR-010, FR-012b)."""
 
