@@ -45,6 +45,7 @@ ERR_NOTHING_TO_EXPORT = 'nothing_to_export'
 ERR_NO_AVAILABLE_TASKS = 'no_available_tasks'
 ERR_EXPORT_NOT_READY = 'export_not_ready'
 ERR_ALL_TILES_FILTERED = 'all_tiles_filtered'
+ERR_NO_REVIEWED_TILES = 'no_reviewed_tiles'
 ERR_NOT_FOUND = 'not_found'
 
 
@@ -134,14 +135,63 @@ class DatasetList(APIView):
                 data.get('name'), data.get('classes'), resolved,
                 resolution_cm_px=data.get('resolution_cm_px'),
                 tile_size_px=data.get('tile_size_px'),
-                min_labeled_fraction=data.get('min_labeled_fraction'),
+                tile_overlap_px=data.get('tile_overlap_px'),
+                elevation_source=data.get('elevation_source'),
+                pixel_dtype=data.get('pixel_dtype'),
+                min_reviewed_fraction=data.get('min_reviewed_fraction'),
                 min_valid_fraction=data.get('min_valid_fraction'),
+                val_fraction=data.get('val_fraction'),
+                split_block_tiles=data.get('split_block_tiles'),
+                stroke_width_m=data.get('stroke_width_m'),
                 created_by=request.user.id)
         except models.ValidationError as exc:
             return validation_error(exc)
 
         store.create_dataset(dataset)
         return Response(_serialize(dataset), status=status.HTTP_201_CREATED)
+
+
+def _patch_settings(current, data):
+    """Aplica los ajustes de exportación que vengan en el PATCH, validándolos.
+
+    Se validan aquí con las mismas funciones que en la creación y no con un `float()` a secas: un
+    `val_fraction` de 1,5 o un solape mayor que la tesela se guardarían sin protestar y reventarían
+    mucho más tarde, durante una exportación de varios minutos.
+    """
+    if 'tile_overlap_px' in data and data['tile_overlap_px'] is not None:
+        current['tile_overlap_px'] = models.validate_overlap(
+            data['tile_overlap_px'], current['tile_size_px'])
+
+    if 'elevation_source' in data and data['elevation_source'] is not None:
+        source = str(data['elevation_source']).strip().lower()
+        if source not in models.ELEVATION_SOURCES:
+            raise models.ValidationError(
+                _('La fuente de elevación debe ser una de %(list)s.')
+                % {'list': ', '.join(models.ELEVATION_SOURCES)}, 'bad_elevation_source')
+        current['elevation_source'] = source
+
+    if 'pixel_dtype' in data and data['pixel_dtype'] is not None:
+        dtype = str(data['pixel_dtype']).strip().lower()
+        if dtype not in models.PIXEL_DTYPES:
+            raise models.ValidationError(
+                _('El tipo de píxel debe ser uno de %(list)s.')
+                % {'list': ', '.join(models.PIXEL_DTYPES)}, 'bad_pixel_dtype')
+        current['pixel_dtype'] = dtype
+
+    for field in ('min_reviewed_fraction', 'min_valid_fraction', 'val_fraction'):
+        if field in data and data[field] is not None:
+            current[field] = models.validate_fraction(data[field], field)
+
+    if 'split_block_tiles' in data and data['split_block_tiles'] is not None:
+        current['split_block_tiles'] = int(models.validate_positive(
+            data['split_block_tiles'],
+            _('El bloque de split debe ser un número de teselas mayor que cero.'),
+            'bad_split_block'))
+
+    if 'stroke_width_m' in data and data['stroke_width_m'] is not None:
+        current['stroke_width_m'] = models.validate_positive(
+            data['stroke_width_m'],
+            _('El ancho por defecto del trazo debe ser mayor que cero.'), 'bad_stroke_width')
 
 
 def _load_task_for_write(request, task_id):
@@ -203,13 +253,13 @@ class DatasetDetail(APIView):
                 if field in data and data[field] is not None:
                     current[field] = (float(data[field]) if field == 'resolution_cm_px'
                                       else int(data[field]))
-            for field in ('min_labeled_fraction', 'min_valid_fraction'):
-                if field in data and data[field] is not None:
-                    current[field] = float(data[field])
+            _patch_settings(current, data)
             return current
 
         try:
             updated = store.update_dataset(dataset_id, mutate)
+        except models.ValidationError as exc:
+            return validation_error(exc)
         except (TypeError, ValueError):
             return error(_('Valor inválido.'), 'bad_request')
 
@@ -314,6 +364,8 @@ class LabelDetail(_LabelViewBase):
                                 else label.get('class_index')),
                 'geometry': data.get('geometry', label['geometry']),
                 'radius_m': data.get('radius_m', label.get('radius_m')),
+                'hard_negative': (data.get('hard_negative') if 'hard_negative' in data
+                                  else label.get('hard_negative', False)),
             }
             try:
                 # Se reconstruye entera en vez de parchear campo a campo: así la geometría nueva
@@ -355,8 +407,8 @@ def run_export_async(dataset_id, export_id, progress_callback=None, should_cance
     libre ni con imports relativos (`from . import ...`), que fallarían con
     `KeyError: "'__name__' not in globals"`. Mismo patrón que `coreplugins/road/compute.py`.
 
-    `rasterio`, `numpy` y `PIL` no se importan aquí: los importa `export.py`, y llegan cargados con
-    él. Traerlos a este cuerpo solo alargaría la función sin cambiar nada.
+    `rasterio` y `numpy` no se importan aquí: los importa `export.py`, y llegan cargados con él.
+    Traerlos a este cuerpo solo alargaría la función sin cambiar nada.
 
     La entrada del índice se cierra **siempre**, salga por donde salga: sin eso una exportación
     fallida se quedaría en `running` para siempre, porque el error solo vive en el resultado de
@@ -391,13 +443,22 @@ def run_export_async(dataset_id, export_id, progress_callback=None, should_cance
         export.delete_package(dataset_id, export_id)
         _finish({'status': 'canceled', 'progress': None, 'celery_task_id': None})
         return {'canceled': True}
+    except export.ExportError as e:
+        # Lleva `code` porque no es un fallo del sistema sino algo que el usuario puede arreglar, y
+        # el frontend decide por el código qué le sugiere hacer (`contracts/rest-api.md`).
+        export.delete_package(dataset_id, export_id)
+        _finish({'status': 'failed', 'progress': None, 'error': e.message,
+                 'error_code': e.code, 'celery_task_id': None})
+        return {'error': e.message, 'code': e.code}
     except Exception as e:
         export.delete_package(dataset_id, export_id)
-        _finish({'status': 'failed', 'progress': None, 'error': str(e), 'celery_task_id': None})
+        _finish({'status': 'failed', 'progress': None, 'error': str(e), 'error_code': None,
+                 'celery_task_id': None})
         return {'error': str(e)}
 
     _finish({'status': 'completed', 'progress': 100, 'error': None, 'celery_task_id': None,
-             'tile_count': result['tile_count'], 'size_bytes': result['size_bytes']})
+             'tile_count': result['tile_count'], 'size_bytes': result['size_bytes'],
+             'train_tiles': result['train_tiles'], 'val_tiles': result['val_tiles']})
     return {'export_id': export_id, 'tile_count': result['tile_count']}
 
 
@@ -457,10 +518,14 @@ class ExportList(APIView):
             else e.get('celery_task_id')))
 
         finished = store.get_export(dataset_id, export_id)
+        # «No hay nada que exportar», «no hay nada revisado» y «lo revisado no supera los umbrales»
+        # son tres problemas distintos con soluciones distintas: responder lo mismo a todos dejaría
+        # al usuario sin saber si le falta etiquetar, marcar revisado o bajar el umbral
+        # (`contracts/rest-api.md`).
+        if finished and finished.get('error_code') == 'no_reviewed_tiles':
+            store.remove_export(dataset_id, export_id)
+            return error(finished.get('error'), ERR_NO_REVIEWED_TILES, tile_count=0)
         if finished and finished.get('status') == 'completed' and not finished.get('tile_count'):
-            # «No hay nada que exportar» y «lo etiquetado no supera los umbrales» son problemas
-            # distintos con soluciones distintas: responder lo mismo a ambos dejaría al usuario sin
-            # saber si le falta etiquetar o si debe bajar el umbral (`contracts/rest-api.md`).
             store.remove_export(dataset_id, export_id)
             export_module.delete_package(dataset_id, export_id)
             return error(_('Todas las teselas quedaron descartadas por los umbrales del dataset.'),

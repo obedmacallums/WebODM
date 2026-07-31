@@ -1,9 +1,10 @@
 import L from 'leaflet';
 import PluginsAPI from 'webodm/classes/plugins/API';
-import { strokeWeightPx, classColor, ERASER_COLOR, ERASER_DASH } from './labelLayer';
+import { strokeWeightPx, classColor, ERASER_COLOR, ERASER_DASH,
+         REVIEW_COLOR, REVIEW_DASH } from './labelLayer';
 
 /**
- * Dibujo de etiquetas sobre la ortofoto: polígonos, pincel y borrador.
+ * Dibujo de etiquetas sobre la ortofoto: polígonos, línea central, ignorar y área revisada.
  *
  * Extiende el enfoque de `coreplugins/annotations/public/PolylineEditor.js` en Leaflet puro, sin
  * librerías nuevas (FR-037, D10). Un polígono es una polilínea cerrada; un trazo de pincel es una
@@ -39,6 +40,10 @@ export const MODE_NONE = null;
 export const MODE_POLYGON = 'polygon';
 export const MODE_BRUSH = 'brush';
 export const MODE_ERASER = 'eraser';
+// Marcar terreno como revisado es dibujar un polígono, pero lo que afirma no es «aquí hay esto»
+// sino «esto lo he mirado». De ahí que sea un modo propio y no una clase más: dentro de un área
+// revisada, lo que no lleve etiqueta pasa a ser fondo real (0) en vez de «no lo sé» (255).
+export const MODE_REVIEW = 'review';
 export const MODE_SELECT = 'select';
 
 /**
@@ -65,7 +70,8 @@ export default class LabelEditor {
     this.map = options.map;
     this.classes = options.classes || [];
     this.classIndex = options.classIndex !== undefined ? options.classIndex : null;
-    this.radiusM = options.radiusM || 3;
+    this.radiusM = options.radiusM || 6;   // 12 m de ancho total, la pista minera típica
+    this.hardNegative = !!options.hardNegative;
     this.onCreate = options.onCreate || function(){};
     this.onSelect = options.onSelect || function(){};
     this.onExitMode = options.onExitMode || function(){};
@@ -180,15 +186,29 @@ export default class LabelEditor {
   setClasses(classes){ this.classes = classes || []; }
 
   isActive(){
-    return this.mode === MODE_POLYGON || this.mode === MODE_BRUSH || this.mode === MODE_ERASER;
+    return this.mode === MODE_POLYGON || this.mode === MODE_BRUSH ||
+           this.mode === MODE_ERASER || this.mode === MODE_REVIEW;
   }
 
   isBrush(){ return this.mode === MODE_BRUSH || this.mode === MODE_ERASER; }
 
-  /** La clase que se asignará: el borrador va sin clase, que no es la clase 0 (FR-014). */
+  /** Los dos modos que se dibujan clic a clic cerrando un anillo. */
+  isRing(){ return this.mode === MODE_POLYGON || this.mode === MODE_REVIEW; }
+
+  /**
+   * La clase que se asignará.
+   *
+   * `null` en «ignorar» y en «área revisada», pero por motivos distintos: la primera manda esos
+   * píxeles a 255 y la segunda no pinta clase ninguna, solo declara el terreno mirado. Lo que
+   * ninguna de las dos hace es pintar la clase 0, que sería afirmar «aquí no hay camino»
+   * (FR-014, FR-026).
+   */
   activeClassIndex(){
-    return this.mode === MODE_ERASER ? null : this.classIndex;
+    return (this.mode === MODE_ERASER || this.mode === MODE_REVIEW) ? null : this.classIndex;
   }
+
+  /** Marca el área revisada en curso como negativo difícil (FR-043). */
+  setHardNegative(value){ this.hardNegative = !!value; }
 
   // --- El mapa cede el control mientras se dibuja --------------------------------------
 
@@ -219,13 +239,13 @@ export default class LabelEditor {
       this.onSelect(e);
       return;
     }
-    if (this.mode !== MODE_POLYGON || this._suppressClicks) return;
+    if (!this.isRing() || this._suppressClicks) return;
     this._pushPoint(e.latlng);
     this._updatePreview();
   }
 
   _onDoubleClick(e){
-    if (this.mode !== MODE_POLYGON) return;
+    if (!this.isRing()) return;
     // Un doble clic del navegador dispara dos `click` antes que este evento, así que el último
     // vértice está puesto dos veces: se descarta el sobrante y se cierra. Sin esto el polígono
     // guardaría dos vértices idénticos y el lado que forman mediría cero (mismo caso que
@@ -262,7 +282,7 @@ export default class LabelEditor {
     // Trazando un polígono, el cursor arrastra una línea elástica que enseña dónde caería el
     // tramo siguiente. Sin ella hay que clicar para descubrir el resultado, y corregir un vértice
     // mal puesto cuesta cerrar la figura y volver a empezar.
-    if (this.mode === MODE_POLYGON && this.points.length) this._updateRubberBand(e.latlng);
+    if (this.isRing() && this.points.length) this._updateRubberBand(e.latlng);
   }
 
   /**
@@ -341,7 +361,7 @@ export default class LabelEditor {
    */
   _pushPoint(latlng){
     this.points.push([latlng.lng, latlng.lat]);
-    if (this.mode === MODE_POLYGON){
+    if (this.isRing()){
       const marker = this.L.marker(latlng, {icon: VERTEX_ICON, interactive: false});
       marker.addTo(this.map);
       this._drawVertexMarkers.push(marker);
@@ -360,9 +380,17 @@ export default class LabelEditor {
 
   _style(){
     const isEraser = this.mode === MODE_ERASER;
-    const color = isEraser ? ERASER_COLOR : classColor(this.classes, this.classIndex);
+    const isReview = this.mode === MODE_REVIEW;
     const lat = this.points.length ? this.points[0][1] : this.map.getCenter().lat;
 
+    if (isReview){
+      // Sin relleno apenas y con trazo discontinuo: un área revisada suele abarcar media pantalla
+      // y con relleno opaco taparía justo las etiquetas que hay que ver dentro de ella.
+      return {color: REVIEW_COLOR, weight: 2, fillColor: REVIEW_COLOR, fillOpacity: 0.05,
+              dashArray: REVIEW_DASH};
+    }
+
+    const color = isEraser ? ERASER_COLOR : classColor(this.classes, this.classIndex);
     if (this.isBrush()){
       return {color: color, opacity: 0.7, lineCap: 'round', lineJoin: 'round',
               dashArray: isEraser ? ERASER_DASH : null,
@@ -413,8 +441,8 @@ export default class LabelEditor {
    * es lo normal cuando el usuario hace clic sin arrastrar.
    */
   finish(){
-    const kind = this.isBrush() ? 'stroke' : 'polygon';
-    const minimum = kind === 'polygon' ? 3 : 2;
+    const kind = this.isBrush() ? 'stroke' : (this.mode === MODE_REVIEW ? 'review' : 'polygon');
+    const minimum = kind === 'stroke' ? 2 : 3;
 
     if (this.points.length < minimum){
       this._cancel();
@@ -427,6 +455,7 @@ export default class LabelEditor {
       geometry: this.points.slice(),
       radius_m: kind === 'stroke' ? this.radiusM : null
     };
+    if (kind === 'review') label.hard_negative = !!this.hardNegative;
 
     this._cancel();
     this.onCreate(label);

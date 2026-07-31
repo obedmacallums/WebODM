@@ -32,7 +32,12 @@ class ExportApiTest(TrainingTestBase):
         return self._api('datasets', self.dataset['id'], 'exports', *extra)
 
     def _label_something(self):
-        self._add_label(self.dataset, self.task, class_index=0, geometry=square(0, 0, 15))
+        """Lo mínimo para que una exportación produzca teselas: revisar y etiquetar.
+
+        El área revisada es tan imprescindible como la etiqueta: sin ella la máscara sale entera a
+        255 y no hay tesela que llegue al umbral (D18).
+        """
+        self._review_all(self.dataset, self.task)
         self._add_label(self.dataset, self.task, class_index=1, geometry=square(2, 2, 5))
 
     # --- Lanzar ---------------------------------------------------------------------------
@@ -63,13 +68,22 @@ class ExportApiTest(TrainingTestBase):
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.data['code'], 'nothing_to_export')
 
-    def test_export_whose_tiles_are_all_filtered_says_so(self):
+    def test_export_without_reviewed_areas_says_so(self):
+        """Etiquetar sin revisar no basta, y el mensaje tiene que decir qué falta (FR-041)."""
         self._add_label(self.dataset, self.task, class_index=1, geometry=square(0, 0, 3))
-        store.update_dataset(self.dataset['id'], lambda d: dict(d, min_labeled_fraction=0.99))
 
         res = self.client.post(self._url(), {}, format='json')
         self.assertEqual(res.status_code, 400)
-        self.assertEqual(res.data['code'], 'all_tiles_filtered')
+        self.assertEqual(res.data['code'], 'no_reviewed_tiles')
+        self.assertIn('revisadas', res.data['error'])
+
+    def test_export_whose_tiles_are_all_filtered_says_so(self):
+        self._review_box(self.dataset, self.task, 0, 0, 5, 5)
+        store.update_dataset(self.dataset['id'], lambda d: dict(d, min_reviewed_fraction=1.0))
+
+        res = self.client.post(self._url(), {}, format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data['code'], 'no_reviewed_tiles')
         self.assertIn('tile_count', res.data)
 
     def test_export_without_available_tasks_is_rejected(self):
@@ -115,15 +129,16 @@ class ExportApiTest(TrainingTestBase):
         self.assertIn('attachment', res['Content-Disposition'])
         self.assertIn('.zip', res['Content-Disposition'])
 
-    def test_downloaded_package_is_a_readable_zip_with_a_manifest(self):
+    def test_downloaded_package_is_a_readable_zip_with_its_metadata(self):
         self._label_something()
         export_id = self.client.post(self._url(), {}, format='json').data['export_id']
 
         path = export.package_path(self.dataset['id'], export_id)
         with zipfile.ZipFile(path) as archive:
-            manifest = json.loads(archive.read('manifest.json'))
-        self.assertEqual(manifest['schema_version'], 1)
-        self.assertEqual(manifest['ignore_index'], 255)
+            meta = json.loads(archive.read('dataset.json'))
+        self.assertEqual(meta['schema_version'], 2)
+        self.assertEqual(meta['ignore_index'], 255)
+        self.assertEqual(meta['background_index'], 0)
 
     def test_downloading_an_unfinished_export_is_rejected(self):
         self._label_something()

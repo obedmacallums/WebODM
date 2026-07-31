@@ -38,6 +38,9 @@ class FrontendUnitTest(SimpleTestCase):
     def test_label_layer_respects_order_and_colors(self):
         self._run_js('labelLayer.test.js')
 
+    def test_reviewed_areas_are_not_class_zero(self):
+        self._run_js('reviewArea.test.js')
+
     def test_label_editor_draws_polygons_strokes_and_erasures(self):
         self._run_js('labelEditor.test.js')
 

@@ -38,6 +38,13 @@ ORTHO_ORIGIN = (400000.0, 6000000.0)  # (x, y) de la esquina superior izquierda,
 ORTHO_RES = 0.05                      # m/px nativos
 ORTHO_SIZE = 600                      # px por lado -> 30 m x 30 m
 
+# El DTM sintético es un plano inclinado hacia el este con esta pendiente, en metros por metro.
+# 0,5 da una pendiente de atan(0,5) = 26,565°, dentro del techo de 45° y lejos de él, así que la
+# normalización se puede comprobar sin saturar.
+DTM_GRADIENT = 0.5
+DTM_BASE_M = 4100.0                   # cota parecida a la de la mina real del usuario
+DTM_RES = 0.10                        # m/px nativos: el DTM se escribe más grueso que la ortofoto
+
 
 def xy_to_lnglat(x, y, epsg=ORTHO_EPSG):
     lng, lat = warp_transform(CRS.from_epsg(epsg), CRS.from_epsg(4326), [x], [y])
@@ -93,6 +100,69 @@ def make_orthophoto(path, size=ORTHO_SIZE, res=ORTHO_RES, origin=ORTHO_ORIGIN, e
     return path
 
 
+def make_dtm(path, size=ORTHO_SIZE, res=ORTHO_RES, origin=ORTHO_ORIGIN, epsg=ORTHO_EPSG,
+             gradient=DTM_GRADIENT, base=DTM_BASE_M, native_res=DTM_RES, nodata_corner=False):
+    """Escribe un DTM sintético: un plano inclinado hacia el este de pendiente conocida.
+
+    Un plano y no ruido a propósito. Sus dos canales derivados tienen valor cerrado, así que los
+    tests comprueban un número y no un rango:
+
+    - **pendiente** = `atan(gradient)`, la misma en todo el ráster. Con 0,5 son 26,565°.
+    - **rugosidad** = **cero exacto**, porque se mide como residuo respecto al plano local y un
+      plano no se aparta de sí mismo. Es la comprobación que separa rugosidad de pendiente: con el
+      TRI de Riley este mismo ráster daría 0,0375 m, o sea la pendiente disfrazada.
+
+    Se escribe a `native_res` (10 cm/px), más grueso que la ortofoto (5 cm) y con **origen propio**,
+    para que la alineación de D15 tenga de verdad algo que corregir. Un DTM ya alineado dejaría el
+    `reproject` sin ejercitar y el test pasaría sin probar lo que importa.
+    """
+    span_m = size * res
+    native_size = int(round(span_m / native_res))
+
+    columns = np.arange(native_size, dtype=np.float64) * native_res
+    elevation = (base + gradient * columns).astype(np.float32)
+    elevation = np.broadcast_to(elevation, (native_size, native_size)).copy()
+
+    nodata = -9999.0
+    if nodata_corner:
+        elevation[native_size // 2:, native_size // 2:] = nodata
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    profile = {
+        'driver': 'GTiff', 'width': native_size, 'height': native_size, 'count': 1,
+        'dtype': 'float32', 'crs': CRS.from_epsg(epsg), 'nodata': nodata,
+        # Medio píxel de desfase en Y, que es lo que se midió entre la ortofoto y el DTM reales de
+        # la mina (3,8 cm sobre 6,35 cm/px). Sin esto la rejilla saldría casualmente alineada.
+        'transform': from_origin(origin[0], origin[1] - native_res / 2, native_res, native_res),
+    }
+    with rasterio.open(path, 'w', **profile) as dst:
+        dst.write(elevation, 1)
+    return path
+
+
+def expected_slope_degrees(gradient=DTM_GRADIENT):
+    return np.degrees(np.arctan(gradient))
+
+
+def expected_tri_m(gradient=DTM_GRADIENT, step_m=0.10):
+    """TRI de Riley sobre un plano: 6 vecinos a `±g*paso` y 2 a cero, entre 8.
+
+    No es lo que calcula el plugin; se conserva para poder afirmar en los tests **cuánto** habría
+    contaminado el canal de rugosidad si se hubiera usado el TRI.
+    """
+    return 6.0 * gradient * step_m / 8.0
+
+
+def expected_checkerboard_roughness_m(amplitude):
+    """Rugosidad de un damero de amplitud `A`, en metros.
+
+    Sobre un damero el plano de mínimos cuadrados de la ventana 3x3 es horizontal y su término
+    independiente es `±A/9`, así que el residuo cuadrático medio vale
+    `A * sqrt((5*(8/9)^2 + 4*(10/9)^2) / 9) = A * sqrt(80/81)`.
+    """
+    return amplitude * np.sqrt(80.0 / 81.0)
+
+
 class TrainingTestBase(BootTestCase):
     """Andamiaje común de la suite (patrón de `road` y `annotations`)."""
 
@@ -107,15 +177,25 @@ class TrainingTestBase(BootTestCase):
         if project is None:
             project = self._project()
         defaults = dict(project=project, status=status_codes.COMPLETED,
-                        available_assets=["orthophoto.tif"], orthophoto_extent=ortho_extent(),
+                        available_assets=["orthophoto.tif", "dtm.tif"],
+                        orthophoto_extent=ortho_extent(),
                         epsg=ORTHO_EPSG, name="Task with orthophoto")
         defaults.update(kwargs)
         return Task.objects.create(**defaults)
 
-    def _task_with_orthophoto(self, project=None, **task_kwargs):
-        """Tarea con la ortofoto sintética escrita en la ruta de asset que WebODM espera."""
+    def _task_with_orthophoto(self, project=None, with_dtm=True, nodata_corner=True,
+                              **task_kwargs):
+        """Tarea con la ortofoto —y por defecto el DTM— en la ruta de asset que WebODM espera.
+
+        El DTM va por defecto porque sin él la tarea se salta entera: el paquete es de 5 bandas y
+        una tarea sin elevación solo podría aportar 3 (FR-044). `with_dtm=False` es justamente el
+        caso que hay que poder probar.
+        """
         task = self._task(project, **task_kwargs)
-        make_orthophoto(task.get_asset_download_path('orthophoto.tif'))
+        make_orthophoto(task.get_asset_download_path('orthophoto.tif'),
+                        nodata_corner=nodata_corner)
+        if with_dtm:
+            make_dtm(task.get_asset_download_path('dtm.tif'))
         self.addCleanup(shutil.rmtree, task.task_path(), ignore_errors=True)
         return task
 
@@ -134,9 +214,22 @@ class TrainingTestBase(BootTestCase):
             'tasks': [{'task_id': str(task.id), 'project_id': task.project_id}],
             'resolution_cm_px': 10.0,
             'tile_size_px': 64,
+            # Bloques de 2 teselas y no los 4 de producción. La ortofoto sintética mide 30 m, que a
+            # teselas de 6,4 m con paso de 5,6 da una rejilla de 5x5 candidatas: con bloques de 4
+            # salen solo 2x2 bloques, y si el sorteo manda a validación el bloque grande, el
+            # pasillo se lleva las teselas de entrenamiento que quedan. Medido: pasa en el 24 % de
+            # las semillas, y la semilla es el uuid del dataset — o sea, un test que falla uno de
+            # cada cuatro días. Con bloques de 2 son 9 bloques y no ocurre nunca (0/500).
+            'split_block_tiles': 2,
         }
         payload.update(overrides)
         return payload
+
+    # Campos de configuración que `make_dataset` acepta por nombre. La lista está aquí para que
+    # añadir un ajuste nuevo no obligue a tocar cada test que lo quiera usar.
+    _DATASET_SETTINGS = ('resolution_cm_px', 'tile_size_px', 'tile_overlap_px', 'elevation_source',
+                         'pixel_dtype', 'min_reviewed_fraction', 'min_valid_fraction',
+                         'val_fraction', 'split_block_tiles', 'stroke_width_m')
 
     def _create_dataset(self, task, owner='testuser', **overrides):
         """Crea un dataset directamente por el store, sin pasar por la API.
@@ -147,11 +240,13 @@ class TrainingTestBase(BootTestCase):
         """
         from coreplugins.training import models, store
         payload = self._dataset_payload(task, **overrides)
+        settings = {k: payload[k] for k in self._DATASET_SETTINGS if k in payload}
+        # Con una tesela de 64 px el solape por defecto (1/8) son 8 px, que mantiene la rejilla de
+        # los tests manejable y sigue ejercitando el solape de verdad.
         dataset = models.make_dataset(
             payload['name'], payload['classes'], payload['tasks'],
-            resolution_cm_px=payload.get('resolution_cm_px'),
-            tile_size_px=payload.get('tile_size_px'),
-            created_by=User.objects.get(username=owner).id if owner else None)
+            created_by=User.objects.get(username=owner).id if owner else None,
+            **settings)
         store.create_dataset(dataset)
         self.addCleanup(store.delete_dataset, dataset['id'])
         return dataset
@@ -162,6 +257,27 @@ class TrainingTestBase(BootTestCase):
         return store.add_label(
             dataset['id'], str(task.id),
             lambda order: models.make_label(dataset, payload, order))
+
+    def _review_all(self, dataset, task, margin_m=0.0, **payload):
+        """Declara revisada la ortofoto entera.
+
+        Sin un área revisada no se exporta nada, así que casi todos los tests de exportación
+        necesitan esto. Es el equivalente de lo que hace el anotador cuando ha recorrido el vuelo
+        completo: afirma que lo que no lleve etiqueta es fondo de verdad, no «no lo sé».
+        """
+        span = ORTHO_SIZE * ORTHO_RES
+        corners = [(-margin_m, -margin_m), (span + margin_m, -margin_m),
+                   (span + margin_m, span + margin_m), (-margin_m, span + margin_m)]
+        return self._add_label(dataset, task, kind='review',
+                               geometry=[list(offset_to_lnglat(dx, dy)) for dx, dy in corners],
+                               **payload)
+
+    def _review_box(self, dataset, task, x0, y0, x1, y1, **payload):
+        """Área revisada rectangular, en metros desde la esquina superior izquierda."""
+        corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        return self._add_label(dataset, task, kind='review',
+                               geometry=[list(offset_to_lnglat(dx, dy)) for dx, dy in corners],
+                               **payload)
 
     def _api(self, *parts):
         return '/api/plugins/training/' + '/'.join(str(p) for p in parts)

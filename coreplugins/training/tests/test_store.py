@@ -63,11 +63,58 @@ class DatasetValidationTest(TrainingTestBase):
     def test_defaults_match_the_spec(self):
         dataset = models.make_dataset('d', [{'index': 0, 'name': 'bg'}, {'index': 1, 'name': 'r'}],
                                       ['task-1'])
-        self.assertEqual(dataset['resolution_cm_px'], 10.0)      # FR-005
-        self.assertEqual(dataset['tile_size_px'], 512)           # FR-024
-        self.assertEqual(dataset['min_labeled_fraction'], 0.01)  # FR-027
-        self.assertEqual(dataset['min_valid_fraction'], 0.50)    # FR-027
-        self.assertEqual(dataset['schema_version'], 1)
+        self.assertEqual(dataset['resolution_cm_px'], 10.0)        # FR-005
+        self.assertEqual(dataset['tile_size_px'], 512)             # FR-024
+        self.assertEqual(dataset['tile_overlap_px'], 64)           # FR-039
+        self.assertEqual(dataset['min_reviewed_fraction'], 0.90)   # FR-041
+        self.assertEqual(dataset['min_valid_fraction'], 0.80)      # FR-027: 20 % de nodata máximo
+        self.assertEqual(dataset['elevation_source'], 'dtm')       # FR-044
+        self.assertEqual(dataset['pixel_dtype'], 'float32')
+        self.assertEqual(dataset['val_fraction'], 0.20)            # FR-042
+        self.assertEqual(dataset['split_block_tiles'], 4)          # FR-042
+        self.assertEqual(dataset['stroke_width_m'], 12.0)          # FR-011b
+        self.assertEqual(dataset['schema_version'], 2)
+
+    def test_the_default_overlap_scales_with_the_tile(self):
+        """64 px sobre 512 es 1/8; sobre una tesela pequeña un valor fijo daría paso 1 px."""
+        classes = [{'index': 0, 'name': 'bg'}, {'index': 1, 'name': 'r'}]
+        for tile_size, expected in ((512, 64), (256, 32), (64, 8), (8, 1)):
+            dataset = models.make_dataset('d', classes, ['task-1'], tile_size_px=tile_size)
+            self.assertEqual(dataset['tile_overlap_px'], expected)
+            self.assertGreater(tile_size - dataset['tile_overlap_px'], 0,
+                               'el paso de la rejilla nunca puede ser cero')
+
+    def test_an_overlap_as_large_as_the_tile_is_rejected(self):
+        with self.assertRaises(models.ValidationError) as ctx:
+            models.make_dataset('d', [{'index': 0, 'name': 'bg'}, {'index': 1, 'name': 'r'}],
+                                ['task-1'], tile_size_px=512, tile_overlap_px=512)
+        self.assertEqual(ctx.exception.code, 'bad_overlap')
+
+    def test_a_schema_1_dataset_gains_the_new_fields_on_read(self):
+        """Compatibilidad: los datasets ya etiquetados siguen abriéndose (`models.with_defaults`)."""
+        legacy = {
+            'id': 'legacy-1', 'name': 'viejo', 'schema_version': 1,
+            'resolution_cm_px': 10.0, 'tile_size_px': 512,
+            'classes': [{'index': 0, 'name': 'bg', 'color': '#4a4a4a'},
+                        {'index': 1, 'name': 'road', 'color': '#1f78ff'}],
+            'tasks': [{'task_id': 'task-1', 'project_id': None}],
+            'min_labeled_fraction': 0.01, 'min_valid_fraction': 0.50,
+        }
+        filled = models.with_defaults(dict(legacy))
+
+        self.assertEqual(filled['tile_overlap_px'], 64)
+        self.assertEqual(filled['elevation_source'], 'dtm')
+        self.assertEqual(filled['min_reviewed_fraction'], 0.90)
+        self.assertEqual(filled['min_valid_fraction'], 0.80,
+                         'el umbral por defecto viejo (0,50) se actualiza al nuevo')
+        self.assertNotIn('min_labeled_fraction', filled)
+        self.assertEqual(filled['schema_version'], 1,
+                         'el esquema con el que se creó no se reescribe')
+
+    def test_a_hand_tuned_valid_fraction_survives_the_upgrade(self):
+        legacy = {'id': 'x', 'name': 'x', 'schema_version': 1, 'tile_size_px': 512,
+                  'min_valid_fraction': 0.25}
+        self.assertEqual(models.with_defaults(dict(legacy))['min_valid_fraction'], 0.25)
 
     def test_resolution_must_be_positive(self):
         for bad in (0, -5, 'abc'):

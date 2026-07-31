@@ -27,9 +27,16 @@ function setupDom(html = '<!doctype html><html><body></body></html>'){
 
 /** Un módulo ES del plugin convertido a algo que Node pueda evaluar. */
 function toEvaluable(src){
-  // Las líneas de `import` se quitan enteras: cada dependencia entra como parámetro de la
-  // función, así el test decide qué stub recibe cada módulo.
-  let out = src.replace(/^[ \t]*import[^\n]*\n/gm, '');
+  // Los `import` se quitan enteros: cada dependencia entra como parámetro de la función, así el
+  // test decide qué stub recibe cada módulo.
+  //
+  // El primer patrón llega hasta el `from '...'` cruzando saltos de línea, porque una lista larga
+  // de nombres importados se parte en varias líneas y quitar solo la primera dejaba el resto como
+  // código suelto: `SyntaxError: Unexpected identifier 'from'`, un error que no señala al import
+  // sino a la línea siguiente. El segundo cubre el import sin `from` (`import './x.css'`).
+  let out = src
+    .replace(/^[ \t]*import[\s\S]*?from[ \t]*['"][^'"]+['"][ \t]*;?[ \t]*\r?\n/gm, '')
+    .replace(/^[ \t]*import[ \t]+['"][^'"]+['"][ \t]*;?[ \t]*\r?\n/gm, '');
 
   const defaultClass = out.match(/export default class (\w+)/);
   const named = [

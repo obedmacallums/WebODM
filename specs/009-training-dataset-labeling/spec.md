@@ -314,10 +314,10 @@ resumen, y comprobar que avisa de ello antes de dejar exportar.
   en un ejemplo que le enseña al modelo que los caminos no son caminos. Ese fallo es silencioso y
   arruina el entrenamiento; el fallo contrario —que el modelo no aprenda el fondo— es ruidoso y lo
   avisa FR-033.
-- **FR-027**: La exportación DEBE omitir las teselas sin contenido etiquetado y las que no tengan
-  suficientes píxeles válidos de ortofoto. Ambos umbrales son configurables por dataset, con estos
-  valores por defecto: se descarta la tesela si menos del **1 %** de su superficie está etiquetada, o
-  si menos del **50 %** de sus píxeles tienen datos de ortofoto.
+- **FR-027**: La exportación DEBE omitir las teselas sin suficiente superficie revisada y las que no
+  tengan suficientes píxeles válidos de ortofoto. Ambos umbrales son configurables por dataset, con
+  estos valores por defecto: se descarta la tesela si menos del **90 %** de su superficie está
+  revisada (FR-041), o si más del **20 %** de sus píxeles no tienen datos de ortofoto.
 - **FR-028**: El manifiesto DEBE declarar, como mínimo: versión del esquema, identidad y nombre del
   dataset, resolución en cm/px, tamaño de tesela, lista de clases con índice y nombre, valor de
   «ignorar», y la lista de teselas con su fichero de imagen, su fichero de máscara, la tarea de
@@ -350,6 +350,39 @@ resumen, y comprobar que avisa de ello antes de dejar exportar.
   fork (inventario verificado en Assumptions).
 - **FR-038**: El plugin DEBE poder deshabilitarse sin romper el resto del sistema, y su presencia no
   debe alterar el comportamiento de WebODM cuando está desactivado. (Constitución, Principio III.)
+
+**Entrada multibanda y curación** *(añadidos tras la especificación de entrada del modelo)*
+
+- **FR-039**: Las teselas DEBEN solaparse. El solape por defecto es de **64 px sobre 512**, o sea
+  1/8 del lado, y es configurable por dataset. Justificación: con paso igual al tamaño, un camino
+  que cruce la junta aparece partido y en ninguna de las dos teselas se ve entero. El solape se
+  expresa como fracción del lado y no como valor fijo para que una tesela pequeña no acabe con paso
+  de 1 px.
+- **FR-040**: El fondo (clase 0) DEBE proceder de una afirmación explícita del anotador —un **área
+  revisada**— y nunca de la ausencia de etiquetas. Lo no revisado sale como «ignorar». Justificación:
+  el fondo es una etiqueta valiosa y el modelo aprende de los negativos, pero solo si son ciertos;
+  un camino real sin etiquetar dentro de una zona dada por revisada enseña activamente que no es un
+  camino, y ese ruido hace más daño que tener menos datos.
+- **FR-041**: El anotador DEBE poder marcar zonas como revisadas y el exportador DEBE incluir solo
+  las teselas cuya superficie revisada llegue al umbral. Lo no revisado que quede dentro de una
+  tesela exportada sale como «ignorar».
+- **FR-042**: El reparto train/val DEBE ser por zonas geográficas y NUNCA aleatorio por tesela.
+  Se reparten bloques enteros de teselas contiguas y las teselas de entrenamiento que solapen con un
+  bloque de validación se descartan, de modo que **ningún píxel de validación aparezca en el
+  entrenamiento**. Por defecto: bloques de **4 teselas** de lado y **20 %** a validación.
+  Justificación: con teselas solapadas, un reparto aleatorio comparte píxeles literales entre los
+  dos lados y la métrica de validación deja de significar nada.
+- **FR-043**: El anotador DEBE poder marcar un área revisada como **negativo difícil** —terreno sin
+  camino pero parecido a uno: canchas de acopio, plataformas, botaderos, cauces secos— y el paquete
+  DEBE declarar qué proporción del dataset lo son, para poder mantenerla en el 20-30 % deseado.
+- **FR-044**: Las teselas de imagen DEBEN llevar **5 bandas**: `R, G, B, pendiente, rugosidad`, las
+  dos últimas derivadas del **DTM** de ODM (con caída al DSM si la tarea no tiene DTM, y solo en ese
+  sentido). NUNCA se exporta la elevación absoluta. Una tarea sin ráster de elevación se salta
+  entera declarando el motivo, en vez de aportar teselas de 3 bandas que romperían el paquete.
+- **FR-045**: El paquete DEBE declarar los parámetros de normalización con la fórmula escrita y sus
+  constantes numéricas, banda a banda. Justificación: la inferencia del plugin tiene que aplicar
+  **exactamente** la misma transformación, y deducirla de un puñado de números sueltos es como se
+  introducen los desajustes entre entrenamiento y producción que luego nadie encuentra.
 
 ### Key Entities
 

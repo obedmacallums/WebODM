@@ -2,7 +2,7 @@ import React from 'react';
 import PropTypes from 'prop-types';
 import ErrorMessage from 'webodm/components/ErrorMessage';
 import { _ } from 'webodm/classes/gettext';
-import LabelEditor, { MODE_NONE, MODE_POLYGON, MODE_BRUSH, MODE_ERASER, MODE_SELECT }
+import LabelEditor, { MODE_NONE, MODE_POLYGON, MODE_BRUSH, MODE_ERASER, MODE_REVIEW, MODE_SELECT }
   from './LabelEditor';
 import { createLabelLayer } from './labelLayer';
 import { shouldRebuildEditor } from './panelLifecycle';
@@ -36,7 +36,10 @@ export default class TrainingPanel extends React.Component {
       datasetId: null,
       classIndex: 1,
       mode: MODE_NONE,
-      radiusM: 3,
+      // El ancho, no el radio: es lo que el usuario sabe de una pista («12 m de doble sentido»),
+      // mientras que «6 m de radio» hay que traducirlo mentalmente cada vez (FR-011b).
+      widthM: 12,
+      hardNegative: false,
       labels: [],
       saving: false,
       exports: [],
@@ -109,7 +112,8 @@ export default class TrainingPanel extends React.Component {
       map: this.props.map,
       classes: this.dataset() ? this.dataset().classes : [],
       classIndex: this.state.classIndex,
-      radiusM: this.state.radiusM,
+      radiusM: this.state.widthM / 2,
+      hardNegative: this.state.hardNegative,
       onCreate: this.createLabel,
       // Escape suelta la herramienta: el panel es quien manda sobre el modo, así que el editor
       // avisa en vez de cambiarlo por su cuenta y dejar los botones desincronizados.
@@ -286,10 +290,16 @@ export default class TrainingPanel extends React.Component {
     if (this.editor) this.editor.setClassIndex(classIndex);
   };
 
-  setRadius = (e) => {
-    const radiusM = parseFloat(e.target.value);
-    this.setState({radiusM});
-    if (this.editor) this.editor.setRadius(radiusM);
+  setWidth = (e) => {
+    const widthM = parseFloat(e.target.value);
+    this.setState({widthM});
+    if (this.editor) this.editor.setRadius(widthM / 2);
+  };
+
+  setHardNegative = (e) => {
+    const hardNegative = e.target.checked;
+    this.setState({hardNegative});
+    if (this.editor) this.editor.setHardNegative(hardNegative);
   };
 
   setDataset = (e) => {
@@ -299,7 +309,8 @@ export default class TrainingPanel extends React.Component {
   render(){
     if (!this.props.isShowed) return (<div/>);
 
-    const { datasets, datasetId, classIndex, mode, radiusM, labels, loading, exports } = this.state;
+    const { datasets, datasetId, classIndex, mode, widthM, hardNegative,
+            labels, loading, exports } = this.state;
     const selected = this.selectedLabel();
     const running = exports.find(e => e.status === 'running');
     const ready = exports.filter(e => e.status === 'completed');
@@ -364,8 +375,17 @@ export default class TrainingPanel extends React.Component {
           <button type="button"
                   className={'btn btn-sm ' + (mode === MODE_ERASER ? 'btn-primary' : 'btn-default')}
                   onClick={() => this.setMode(MODE_ERASER)}
-                  title={_("Erase back to unlabeled — not to background.")}>
-            <i className="fa fa-eraser"/> {_("Eraser")}
+                  title={_("Mark as unknown (255): excluded from the loss. Not the same as background.")}>
+            <i className="fa fa-eraser"/> {_("Ignore")}
+          </button>
+          {/* Es la herramienta de la que depende la calidad del dataset: sin área revisada, el
+              fondo no existe como etiqueta y no se exporta nada. Va la última porque se usa una
+              vez por zona, no una vez por camino. */}
+          <button type="button"
+                  className={'btn btn-sm ' + (mode === MODE_REVIEW ? 'btn-primary' : 'btn-default')}
+                  onClick={() => this.setMode(MODE_REVIEW)}
+                  title={_("Mark ground you have checked. Inside it, anything unlabeled becomes real background.")}>
+            <i className="fa fa-check-square"/> {_("Reviewed area")}
           </button>
         </div>
 
@@ -374,11 +394,15 @@ export default class TrainingPanel extends React.Component {
             con no estar dibujando. */}
         {!!selected && <div className="row-field selection">
           <div className="selection-title">
-            {_("Selected")}: {selected.kind === 'stroke' ? _("stroke") : _("polygon")}
+            {_("Selected")}: {
+              selected.kind === 'stroke' ? _("centreline")
+                : (selected.kind === 'review' ? _("reviewed area") : _("polygon"))}
             {' · '}
-            {selected.class_index === null
-              ? _("eraser")
-              : (dataset.classes.find(c => c.index === selected.class_index) || {}).name}
+            {selected.kind === 'review'
+              ? (selected.hard_negative ? _("hard negative") : _("checked ground"))
+              : (selected.class_index === null
+                  ? _("ignore (255)")
+                  : (dataset.classes.find(c => c.index === selected.class_index) || {}).name)}
           </div>
           <div className="hint">
             {_("Drag a vertex to move it, click the outline to add one, right click a vertex to remove it.")}
@@ -403,16 +427,36 @@ export default class TrainingPanel extends React.Component {
             {_("Click a label on the map to edit or delete it.")}
           </div>}
 
+        {!labels.some(l => l.kind === 'review') && !!datasetId &&
+          <div className="row-field warning">
+            <i className="fa fa-exclamation-triangle"/>{' '}
+            {_("No reviewed area yet: the export will produce nothing. Mark the ground you have checked first.")}
+          </div>}
+
         {mode !== MODE_NONE &&
           <div className="row-field hint">
             {_("Press Esc or click Select to stop drawing and edit existing labels.")}
           </div>}
 
         {(mode === MODE_BRUSH || mode === MODE_ERASER) && <div className="row-field">
-          <label>{_("Radius")}: {radiusM} {_("m")}</label>
-          <input type="range" min="0.5" max="20" step="0.5" value={radiusM}
-                 onChange={this.setRadius}/>
-          <div className="hint">{_("The radius is measured on the ground and stays constant as you zoom.")}</div>
+          <label>{_("Width")}: {widthM} {_("m")}</label>
+          <input type="range" min="1" max="40" step="0.5" value={widthM}
+                 onChange={this.setWidth}/>
+          <div className="hint">
+            {_("Trace the centreline and this width becomes the road. Adjust the edges afterwards where the real width differs.")}
+            {' '}
+            {_("The width is measured on the ground and stays constant as you zoom.")}
+          </div>
+        </div>}
+
+        {mode === MODE_REVIEW && <div className="row-field">
+          <label className="checkbox-inline">
+            <input type="checkbox" checked={hardNegative} onChange={this.setHardNegative}/>
+            {' '}{_("Hard negative")}
+          </label>
+          <div className="hint">
+            {_("Tick this for checked ground with no road but that looks like one: stockpiles, platforms, waste dumps, dry channels. They are counted separately so you can keep them around 20-30% of the dataset.")}
+          </div>
         </div>}
 
         <div className="row-field summary">

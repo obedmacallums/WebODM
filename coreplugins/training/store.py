@@ -100,9 +100,12 @@ def get_dataset(dataset_id):
     dataset = ds.get_json(key, None)
     if not dataset:
         return None
-    dataset.setdefault('schema_version', SCHEMA_VERSION)
+    dataset.setdefault('schema_version', 1)
     dataset.setdefault('exports', [])
-    return dataset
+    # Los campos que el esquema 1 no tenía se completan al leer, no con una migración en disco
+    # (`models.with_defaults`). El `schema_version` guardado se deja como está: es el dato que
+    # dice con qué esquema se creó, y sobrescribirlo aquí borraría esa información.
+    return models.with_defaults(dataset)
 
 
 def create_dataset(dataset):

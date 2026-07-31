@@ -21,5 +21,7 @@ from .test_api_labels import *    # noqa: F401,F403
 from .test_api_exports import *  # noqa: F401,F403
 from .test_tiling import *       # noqa: F401,F403
 from .test_rasterize import *    # noqa: F401,F403
+from .test_elevation import *    # noqa: F401,F403
+from .test_split import *        # noqa: F401,F403
 from .test_export import *       # noqa: F401,F403
 from .test_frontend import *      # noqa: F401,F403

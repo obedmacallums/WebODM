@@ -15,10 +15,20 @@ import L from 'leaflet';
 const EQUATOR_METERS = 40075016.686;
 const TILE_SIZE = 256;
 
-// El borrador no es una clase: se dibuja distinto a propósito, porque confundirlo con la clase 0
+// Ignorar no es una clase: se dibuja distinto a propósito, porque confundirlo con la clase 0
 // arruinaría el entrenamiento (FR-014, FR-026) y el usuario debe poder verlo en el mapa.
 export const ERASER_COLOR = '#ffffff';
 export const ERASER_DASH = '4 4';
+
+// El área revisada tampoco es una clase, y además suele abarcar media pantalla: va en gris neutro,
+// con trazo largo discontinuo y casi sin relleno, para que se lea como un límite y no tape las
+// etiquetas que hay dentro. El gris no compite con ninguna clase ni con el semáforo de `road`.
+export const REVIEW_COLOR = '#9aa0a6';
+export const REVIEW_DASH = '10 6';
+// El negativo difícil se distingue por el relleno, no por el color: sigue siendo un área revisada,
+// solo que una que interesa contar aparte (FR-043).
+export const REVIEW_HARD_FILL_OPACITY = 0.18;
+export const REVIEW_FILL_OPACITY = 0.05;
 
 /** Metros de terreno que mide un píxel de pantalla al zoom actual, en esa latitud. */
 export function metersPerPixel(map, lat){
@@ -39,7 +49,7 @@ export function strokeWeightPx(map, radiusM, lat){
   return Math.max(1, (2 * radiusM) / perPixel);
 }
 
-/** Color de una clase. `null` es el borrador. */
+/** Color de una clase. `null` es la etiqueta de ignorar. */
 export function classColor(classes, classIndex){
   if (classIndex === null || classIndex === undefined) return ERASER_COLOR;
   const found = (classes || []).find(c => c.index === classIndex);
@@ -80,10 +90,21 @@ export function createLabelLayer(map, options = {}){
   let selectedId = null;
 
   function styleFor(label){
+    const selected = label.id === selectedId;
+
+    if (label.kind === 'review'){
+      return {
+        color: selected ? '#ffffff' : REVIEW_COLOR,
+        weight: selected ? 4 : 2,
+        fillColor: REVIEW_COLOR,
+        fillOpacity: label.hard_negative ? REVIEW_HARD_FILL_OPACITY : REVIEW_FILL_OPACITY,
+        dashArray: REVIEW_DASH
+      };
+    }
+
     const color = classColor(classes, label.class_index);
     const dashArray = label.class_index === null || label.class_index === undefined
       ? ERASER_DASH : null;
-    const selected = label.id === selectedId;
 
     if (label.kind === 'stroke'){
       return {

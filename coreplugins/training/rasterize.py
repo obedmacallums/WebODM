@@ -3,22 +3,28 @@
 El núcleo de la feature, y el sitio donde un error sería silencioso: una máscara mal compuesta no
 rompe nada, solo entrena un modelo peor.
 
-Tres reglas, todas verificables:
+Cuatro reglas, todas verificables:
 
-1. **La máscara empieza entera a 255.** Lo que ninguna etiqueta cubra se queda en «ignorar», nunca
-   en clase 0 (FR-026). Es lo contrario de lo que haría un `zeros()`, y de ahí que se escriba
+1. **La máscara empieza entera a 255.** Lo que nadie haya revisado se queda en «ignorar», nunca en
+   clase 0 (FR-026). Es lo contrario de lo que haría un `zeros()`, y de ahí que se escriba
    explícitamente.
-2. **Se pinta en orden ascendente de `order` y gana el último** (FR-012). Rasterizar sobre el
+2. **El fondo lo crean las áreas revisadas, no la ausencia de etiquetas** (D18). Dentro de un área
+   que el anotador declara revisada, lo que no lleve etiqueta es fondo de verdad —clase 0— y el
+   modelo aprende de ello. Fuera, sigue siendo «no lo sé». La diferencia importa: un camino real
+   sin etiquetar dentro de un área revisada enseña activamente «esto no es camino», y ese ruido
+   hace más daño que tener menos datos.
+3. **Se pinta en orden ascendente de `order` y gana el último** (FR-012). Rasterizar sobre el
    mismo array en ese orden produce la precedencia sin ninguna lógica adicional.
-3. **El buffer del pincel se hace en el CRS métrico de la ortofoto** (FR-012b, D4). Aplicarlo
-   sobre grados lo interpretaría como grados y produciría un trazo cinco órdenes de magnitud
-   mayor.
+4. **El buffer de la línea central se hace en el CRS métrico de la ortofoto** (FR-012b, D4).
+   Aplicarlo sobre grados lo interpretaría como grados y produciría un trazo cinco órdenes de
+   magnitud mayor.
 
 El motor geométrico es el GEOS de GeoDjango y no `shapely`, que **no está en la imagen** (D8): una
 dependencia nueva está prohibida por FR-037. `rasterio.features.rasterize` acepta geometrías en
 formato GeoJSON, que es justo lo que GEOS sabe entregar — el mismo camino que ya usa `road`.
 """
 
+import collections
 import json
 
 import numpy as np
@@ -27,7 +33,7 @@ from rasterio.crs import CRS
 from rasterio.features import rasterize as rio_rasterize
 from rasterio.warp import transform as warp_transform
 
-from .models import IGNORE_INDEX
+from .models import BACKGROUND_INDEX, IGNORE_INDEX, KIND_REVIEW
 
 WGS84 = CRS.from_epsg(4326)
 
@@ -37,31 +43,84 @@ WGS84 = CRS.from_epsg(4326)
 BUFFER_QUAD_SEGS = 8
 
 
-def rasterize_tile(labels, tile, crs, tile_size_px):
-    """Máscara `uint8` de `tile_size_px` de lado para una tesela.
+PreparedLabel = collections.namedtuple(
+    'PreparedLabel', 'shape value extent kind hard_negative')
+"""Una etiqueta ya reproyectada al CRS de la ortofoto y traducida a GeoJSON."""
 
-    `labels` son las etiquetas de la tarea; las que no tocan la tesela se descartan aquí mismo, así
-    que quien llama no tiene que filtrarlas.
+
+def prepare_labels(labels, crs):
+    """Reproyecta las etiquetas **una vez por tarea**, no una vez por tesela.
+
+    La rejilla de la mina tiene 900 teselas y el dataset del usuario 53 etiquetas: reproyectar
+    dentro del bucle serían 47 000 llamadas a PROJ para 53 geometrías distintas. Preparar antes es
+    lo que hace que el exportador pueda recorrer la rejilla dos veces —planificar y escribir— sin
+    que la segunda pasada cueste nada.
+
+    Salen ordenadas por `order`, que es la precedencia con la que se pintan (FR-012).
     """
-    mask = np.full((tile_size_px, tile_size_px), IGNORE_INDEX, dtype=np.uint8)
-
-    shapes = []
+    prepared = []
     for label in sorted(labels, key=lambda l: l.get('order', 0)):
         geometry = label_geometry(label, crs)
         if geometry is None:
             continue
-        if not _intersects(geometry.extent, tile.bounds):
-            continue
-        # El borrador devuelve a «ignorar», que es el mismo valor con el que nace la máscara: no
-        # es un caso especial del rasterizado, solo un valor distinto.
-        value = label.get('class_index')
-        shapes.append((json.loads(geometry.geojson),
-                       IGNORE_INDEX if value is None else int(value)))
 
-    if shapes:
-        rio_rasterize(shapes, out=mask, transform=tile.transform, all_touched=False)
+        kind = label.get('kind')
+        if kind == KIND_REVIEW:
+            value = BACKGROUND_INDEX
+        else:
+            # La etiqueta de ignorar devuelve a 255, que es el mismo valor con el que nace la
+            # máscara: no es un caso especial del rasterizado, solo un valor distinto.
+            raw = label.get('class_index')
+            value = IGNORE_INDEX if raw is None else int(raw)
+
+        prepared.append(PreparedLabel(
+            shape=json.loads(geometry.geojson),
+            value=value,
+            extent=geometry.extent,
+            kind=kind,
+            hard_negative=bool(label.get('hard_negative')),
+        ))
+    return prepared
+
+
+def rasterize_prepared(prepared, tile, tile_size_px):
+    """Máscara `uint8` de una tesela a partir de etiquetas ya preparadas.
+
+    Las áreas revisadas se pintan **antes** que todo lo demás y siempre a fondo (0), sin mirar su
+    `order`. No compiten con las etiquetas de clase: establecen el lienzo sobre el que estas se
+    pintan. Así una etiqueta de «ignorar» dibujada dentro de un área revisada sigue ganando —que es
+    justo para lo que sirve: marcar un trozo dudoso dentro de una zona por lo demás revisada.
+    """
+    mask = np.full((tile_size_px, tile_size_px), IGNORE_INDEX, dtype=np.uint8)
+
+    reviewed = []
+    painted = []
+    for label in prepared:
+        if not _intersects(label.extent, tile.bounds):
+            continue
+        (reviewed if label.kind == KIND_REVIEW else painted).append((label.shape, label.value))
+
+    for shapes in (reviewed, painted):
+        if shapes:
+            rio_rasterize(shapes, out=mask, transform=tile.transform, all_touched=False)
 
     return mask
+
+
+def rasterize_tile(labels, tile, crs, tile_size_px):
+    """Máscara de una tesela a partir de las etiquetas crudas.
+
+    Atajo para quien solo va a rasterizar una tesela. El exportador usa `prepare_labels` +
+    `rasterize_prepared`, que hacen lo mismo sin repetir la reproyección.
+    """
+    return rasterize_prepared(prepare_labels(labels, crs), tile, tile_size_px)
+
+
+def touches_hard_negative(prepared, tile):
+    """¿Cae la tesela dentro de un área revisada marcada como negativo difícil? (FR-043)"""
+    return any(label.hard_negative and label.kind == KIND_REVIEW
+               and _intersects(label.extent, tile.bounds)
+               for label in prepared)
 
 
 def project(points, crs):
@@ -139,8 +198,28 @@ def class_pixel_counts(mask):
             for value, count in zip(values, counts) if value != IGNORE_INDEX}
 
 
-def labeled_fraction(mask):
-    """Fracción de la tesela que lleva alguna clase encima (FR-027)."""
+def reviewed_fraction(mask):
+    """Fracción de la tesela que entra en el cálculo de la pérdida (FR-027, FR-041).
+
+    Es decir, todo lo que no sea 255: tanto el camino como el fondo revisado. Es el número que
+    decide si una tesela merece exportarse.
+    """
     if mask.size == 0:
         return 0.0
     return float((mask != IGNORE_INDEX).sum()) / mask.size
+
+
+def positive_fraction(mask):
+    """Fracción de la tesela con alguna clase distinta del fondo.
+
+    A cero en una tesela revisada significa negativo puro: terreno comprobado sin nada que detectar.
+    Es lo que permite contar cuántos negativos lleva el dataset (FR-043).
+    """
+    if mask.size == 0:
+        return 0.0
+    return float(((mask != IGNORE_INDEX) & (mask != BACKGROUND_INDEX)).sum()) / mask.size
+
+
+# Nombre anterior de `reviewed_fraction`. Se conserva porque la semántica es la misma —lo que no es
+# 255— y quitarlo solo rompería a quien lo importe sin ganar nada.
+labeled_fraction = reviewed_fraction

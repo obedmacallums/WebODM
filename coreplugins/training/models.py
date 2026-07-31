@@ -14,20 +14,43 @@ import datetime
 import math
 import uuid
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-# 255 significa «sin etiquetar» y no puede ser el índice de ninguna clase (FR-026). Es la
-# convención `ignore_index` de PyTorch, que es exactamente por lo que vale ese número y no otro.
+# 255 significa «no revisado» y no puede ser el índice de ninguna clase (FR-026). Es la convención
+# `ignore_index` de PyTorch, que es exactamente por lo que vale ese número y no otro.
 IGNORE_INDEX = 255
+
+# 0 es el fondo, y es una etiqueta real: terreno que alguien miró y declaró que no es camino. No
+# confundirlo con 255 es el punto del que depende la calidad del dataset entero (FR-040).
+BACKGROUND_INDEX = 0
 
 DEFAULT_RESOLUTION_CM_PX = 10.0   # FR-005
 DEFAULT_TILE_SIZE_PX = 512        # FR-024
-DEFAULT_MIN_LABELED_FRACTION = 0.01   # FR-027
-DEFAULT_MIN_VALID_FRACTION = 0.50     # FR-027
+# El solape por defecto es una **fracción** de la tesela, no 64 px fijos: sobre la tesela de 512 de
+# la especificación da exactamente los 64 pedidos, y sobre una tesela pequeña no degenera. Con un
+# valor fijo, un dataset de 64 px de tesela habría heredado 64 px de solape, o sea paso 1 px y una
+# rejilla de decenas de miles de teselas sobre el mismo sitio.
+DEFAULT_TILE_OVERLAP_FRACTION = 0.125   # FR-039: 64 / 512
+DEFAULT_MIN_REVIEWED_FRACTION = 0.90  # FR-041
+DEFAULT_MIN_VALID_FRACTION = 0.80     # FR-027: como mucho un 20 % sin datos
+
+DEFAULT_ELEVATION_SOURCE = 'dtm'  # FR-044
+ELEVATION_SOURCES = ('dtm', 'dsm', 'none')
+
+DEFAULT_VAL_FRACTION = 0.20       # FR-042
+DEFAULT_SPLIT_BLOCK_TILES = 4     # FR-042
+
+# Ancho total por defecto de un camino trazado por su línea central (FR-011b). 12 m es el ancho
+# típico de una pista minera de doble sentido; el anotador lo ajusta por trazo.
+DEFAULT_STROKE_WIDTH_M = 12.0
+
+PIXEL_DTYPES = ('float32', 'uint16')
+DEFAULT_PIXEL_DTYPE = 'float32'
 
 KIND_POLYGON = 'polygon'
 KIND_STROKE = 'stroke'
-KINDS = (KIND_POLYGON, KIND_STROKE)
+KIND_REVIEW = 'review'
+KINDS = (KIND_POLYGON, KIND_STROKE, KIND_REVIEW)
 
 SOURCE_MANUAL = 'manual'
 SOURCE_IMPORT = 'import'
@@ -147,18 +170,33 @@ def class_by_index(dataset, index):
 # --- Dataset -----------------------------------------------------------------------------
 
 def make_dataset(name, classes, tasks, resolution_cm_px=None, tile_size_px=None,
-                 min_labeled_fraction=None, min_valid_fraction=None, dataset_id=None,
-                 created_by=None):
+                 min_reviewed_fraction=None, min_valid_fraction=None, dataset_id=None,
+                 created_by=None, tile_overlap_px=None, elevation_source=None,
+                 val_fraction=None, split_block_tiles=None, pixel_dtype=None,
+                 stroke_width_m=None):
     """Construye un dataset validado (`data-model.md` §Dataset)."""
     name = str(name or '').strip()
     if not name:
         raise ValidationError('El dataset necesita un nombre.', 'bad_name')
 
-    resolution = _positive_number(resolution_cm_px, DEFAULT_RESOLUTION_CM_PX,
+    resolution = validate_positive(resolution_cm_px, DEFAULT_RESOLUTION_CM_PX,
                                   'La resolución debe ser mayor que cero.', 'bad_resolution')
-    tile_size = int(_positive_number(tile_size_px, DEFAULT_TILE_SIZE_PX,
+    tile_size = int(validate_positive(tile_size_px, DEFAULT_TILE_SIZE_PX,
                                      'El tamaño de tesela debe ser mayor que cero.',
                                      'bad_tile_size'))
+    overlap = validate_overlap(tile_overlap_px, tile_size)
+
+    source = str(elevation_source or DEFAULT_ELEVATION_SOURCE).strip().lower()
+    if source not in ELEVATION_SOURCES:
+        raise ValidationError(
+            'La fuente de elevación debe ser una de {}.'.format(', '.join(ELEVATION_SOURCES)),
+            'bad_elevation_source')
+
+    dtype = str(pixel_dtype or DEFAULT_PIXEL_DTYPE).strip().lower()
+    if dtype not in PIXEL_DTYPES:
+        raise ValidationError(
+            'El tipo de píxel debe ser uno de {}.'.format(', '.join(PIXEL_DTYPES)),
+            'bad_pixel_dtype')
 
     return {
         'id': dataset_id or str(uuid.uuid4()),
@@ -167,17 +205,51 @@ def make_dataset(name, classes, tasks, resolution_cm_px=None, tile_size_px=None,
         'created_by': created_by,
         'resolution_cm_px': resolution,
         'tile_size_px': tile_size,
+        'tile_overlap_px': overlap,
+        'elevation_source': source,
+        'pixel_dtype': dtype,
         'classes': normalize_classes(classes),
         'tasks': normalize_tasks(tasks),
-        'min_labeled_fraction': _fraction(min_labeled_fraction, DEFAULT_MIN_LABELED_FRACTION,
-                                          'min_labeled_fraction'),
-        'min_valid_fraction': _fraction(min_valid_fraction, DEFAULT_MIN_VALID_FRACTION,
+        'min_reviewed_fraction': validate_fraction(min_reviewed_fraction, DEFAULT_MIN_REVIEWED_FRACTION,
+                                           'min_reviewed_fraction'),
+        'min_valid_fraction': validate_fraction(min_valid_fraction, DEFAULT_MIN_VALID_FRACTION,
                                         'min_valid_fraction'),
+        'val_fraction': validate_fraction(val_fraction, DEFAULT_VAL_FRACTION, 'val_fraction'),
+        'split_block_tiles': int(validate_positive(
+            split_block_tiles, DEFAULT_SPLIT_BLOCK_TILES,
+            'El bloque de split debe ser un número de teselas mayor que cero.',
+            'bad_split_block')),
+        'stroke_width_m': validate_positive(
+            stroke_width_m, DEFAULT_STROKE_WIDTH_M,
+            'El ancho por defecto del trazo debe ser mayor que cero.', 'bad_stroke_width'),
         'schema_version': SCHEMA_VERSION,
     }
 
 
-def _positive_number(value, default, message, code):
+def default_overlap(tile_size_px):
+    return max(0, min(int(int(tile_size_px) * DEFAULT_TILE_OVERLAP_FRACTION),
+                      int(tile_size_px) - 1))
+
+
+def validate_overlap(value, tile_size_px):
+    """Solape en píxeles, acotado a `tile_size - 1`.
+
+    El tope no es defensivo por defecto: un solape igual al tamaño daría paso cero y una rejilla
+    infinita sobre el mismo punto, así que se rechaza en vez de recortarlo en silencio.
+    """
+    if value is None or value == '':
+        return default_overlap(tile_size_px)
+    try:
+        overlap = int(value)
+    except (TypeError, ValueError):
+        raise ValidationError('El solape debe ser un número entero de píxeles.', 'bad_overlap')
+    if overlap < 0 or overlap >= int(tile_size_px):
+        raise ValidationError(
+            'El solape debe estar entre 0 y {} px.'.format(int(tile_size_px) - 1), 'bad_overlap')
+    return overlap
+
+
+def validate_positive(value, default, message, code):
     if value is None or value == '':
         return default
     try:
@@ -189,7 +261,7 @@ def _positive_number(value, default, message, code):
     return number
 
 
-def _fraction(value, default, field):
+def validate_fraction(value, default, field):
     if value is None or value == '':
         return default
     try:
@@ -235,14 +307,53 @@ def dataset_has_task(dataset, task_id):
     return any(t['task_id'] == str(task_id) for t in dataset.get('tasks') or [])
 
 
+def with_defaults(dataset):
+    """Rellena al leer los campos que un dataset de esquema 1 no tenía.
+
+    Se hace **al leer** y no con una migración que reescriba el fichero porque un dataset guardado
+    es el registro de lo que el usuario decidió; completarlo en memoria da compatibilidad sin
+    inventar decisiones en disco. Si mañana cambia un valor por defecto, los datasets viejos lo
+    heredan en vez de quedarse anclados a la elección de hoy.
+
+    El único campo que cambia de nombre es `min_labeled_fraction` -> `min_reviewed_fraction`: mide
+    lo mismo —lo que no es 255— pero ahora esa fracción la produce el área revisada, así que el
+    valor viejo (0,01) sería un umbral absurdo y **no** se arrastra.
+    """
+    if not isinstance(dataset, dict):
+        return dataset
+
+    tile_size = int(dataset.get('tile_size_px') or DEFAULT_TILE_SIZE_PX)
+    dataset.setdefault('tile_overlap_px', default_overlap(tile_size))
+    dataset.setdefault('elevation_source', DEFAULT_ELEVATION_SOURCE)
+    dataset.setdefault('pixel_dtype', DEFAULT_PIXEL_DTYPE)
+    dataset.setdefault('min_reviewed_fraction', DEFAULT_MIN_REVIEWED_FRACTION)
+    dataset.setdefault('val_fraction', DEFAULT_VAL_FRACTION)
+    dataset.setdefault('split_block_tiles', DEFAULT_SPLIT_BLOCK_TILES)
+    dataset.setdefault('stroke_width_m', DEFAULT_STROKE_WIDTH_M)
+
+    if dataset.get('schema_version', 1) < 2:
+        # El umbral de píxeles válidos sube de 0,50 a 0,80 (FR-027): «como mucho un 20 % sin
+        # datos». Un dataset viejo con el valor por defecto antiguo lo adopta; uno que el usuario
+        # hubiera ajustado a mano conserva lo suyo.
+        if dataset.get('min_valid_fraction') == 0.50:
+            dataset['min_valid_fraction'] = DEFAULT_MIN_VALID_FRACTION
+    dataset.setdefault('min_valid_fraction', DEFAULT_MIN_VALID_FRACTION)
+
+    dataset.pop('min_labeled_fraction', None)
+    return dataset
+
+
 # --- Etiquetas ---------------------------------------------------------------------------
 
 def make_label(dataset, payload, order, label_id=None, source=SOURCE_MANUAL):
     """Valida y construye una etiqueta (`data-model.md` §Etiqueta).
 
-    `class_index` a `None` es el borrador (FR-014): al rasterizar devuelve esos píxeles a
-    «ignorar». No es lo mismo que pintar la clase 0, y confundirlos arruinaría el entrenamiento
-    (FR-026), así que se acepta explícitamente en vez de tratarse como un valor ausente.
+    `class_index` a `None` es la etiqueta de «ignorar» (FR-014): al rasterizar devuelve esos
+    píxeles a 255. No es lo mismo que pintar la clase 0 —que afirma «aquí no hay camino»— y
+    confundirlos arruinaría el entrenamiento (FR-026), así que se acepta explícitamente en vez de
+    tratarse como un valor ausente.
+
+    Un área revisada (`KIND_REVIEW`) no lleva clase: no dice qué hay, dice que alguien lo miró.
     """
     kind = str(payload.get('kind') or '').strip()
     if kind not in KINDS:
@@ -250,7 +361,9 @@ def make_label(dataset, payload, order, label_id=None, source=SOURCE_MANUAL):
                               'bad_geometry')
 
     class_index = payload.get('class_index', payload.get('classIndex'))
-    if class_index is not None:
+    if kind == KIND_REVIEW:
+        class_index = None
+    elif class_index is not None:
         try:
             class_index = int(class_index)
         except (TypeError, ValueError):
@@ -273,7 +386,7 @@ def make_label(dataset, payload, order, label_id=None, source=SOURCE_MANUAL):
             raise ValidationError('Un trazo necesita un radio en metros mayor que cero.',
                                   'bad_radius')
 
-    return {
+    label = {
         'id': label_id or str(uuid.uuid4()),
         'class_index': class_index,
         'kind': kind,
@@ -284,6 +397,16 @@ def make_label(dataset, payload, order, label_id=None, source=SOURCE_MANUAL):
         'created_at': now_iso(),
         'updated_at': now_iso(),
     }
+
+    if kind == KIND_REVIEW:
+        # Marca de negativo difícil: terreno revisado sin camino pero **parecido** a uno —canchas
+        # de acopio, plataformas, botaderos, cauces secos—. Se guarda en el área revisada y no en
+        # la tesela porque la rejilla depende de la resolución y del solape, que el usuario puede
+        # cambiar; el terreno no (FR-043).
+        label['hard_negative'] = bool(payload.get('hard_negative',
+                                                  payload.get('hardNegative', False)))
+
+    return label
 
 
 def validate_geometry(kind, geometry):
@@ -312,17 +435,24 @@ def validate_geometry(kind, geometry):
 
     # Un anillo que repite el primer punto al final es lo que entrega GeoJSON; se normaliza a la
     # forma abierta para que el recuento de vértices signifique lo mismo en los dos casos.
-    if kind == KIND_POLYGON and len(points) > 1 and points[0] == points[-1]:
+    is_ring = kind in (KIND_POLYGON, KIND_REVIEW)
+    if is_ring and len(points) > 1 and points[0] == points[-1]:
         points = points[:-1]
 
-    minimum = 3 if kind == KIND_POLYGON else 2
+    minimum = 3 if is_ring else 2
     if len(points) < minimum:
         raise ValidationError(
-            'Un {} necesita al menos {} vértices.'.format(
-                'polígono' if kind == KIND_POLYGON else 'trazo', minimum),
+            'Un {} necesita al menos {} vértices.'.format(_KIND_NAMES[kind], minimum),
             'bad_geometry')
 
     return points
+
+
+_KIND_NAMES = {
+    KIND_POLYGON: 'polígono',
+    KIND_STROKE: 'trazo',
+    KIND_REVIEW: 'área revisada',
+}
 
 
 def simplify_geometry(points, kind, resolution_cm_px):
@@ -342,7 +472,7 @@ def simplify_geometry(points, kind, resolution_cm_px):
         return points
 
     tolerance_deg = (float(resolution_cm_px) / 100.0) / _METERS_PER_DEGREE
-    is_ring = kind == KIND_POLYGON
+    is_ring = kind in (KIND_POLYGON, KIND_REVIEW)
     simplified = _douglas_peucker(points, tolerance_deg, is_ring)
 
     minimum = 3 if is_ring else 2

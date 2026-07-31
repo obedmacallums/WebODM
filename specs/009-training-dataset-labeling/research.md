@@ -238,3 +238,172 @@ del pincel, que es lo que D8 midió y lo único que no depende del orden de ejes
    Hecha: ver `quickstart.md` Escenario 4 y D12. El backend de Celery devolvió `SUCCESS` con el
    valor de retorno de `run_export_async` y el log del worker no registró ningún error.
 3. ~~No se ha medido el tiempo de exportación de un dataset grande.~~ Cerrado en D12.
+
+---
+
+# Decisiones de la entrada multibanda y la curación
+
+Añadidas a partir de la especificación de entrada del modelo. Todas las cifras están medidas sobre
+los datos reales del usuario, no estimadas.
+
+## D14 — Tesela a tesela con halo, no stack global
+
+**La especificación pide** apilar el DTM alineado y la ortofoto en un GeoTIFF de 5 bandas y luego
+tilear. **No se hace así**, y el motivo es aritmético: la ortofoto de la mina a 10 cm/px son
+10 876 x 14 023 px = 152 Mpx, o sea **3,05 GB** en 5 bandas `float32`, por tarea y por exportación.
+El worker no lo sostiene y FR-030 prohíbe construir el paquete en memoria.
+
+**Lo que la especificación quiere de verdad** —y esto sí se cumple— es la **alineación píxel a
+píxel** entre imagen y máscara. Se consigue igual: cada tesela deriva su `transform` de la misma
+rejilla global, la máscara se rasteriza con ese `transform` y el DTM se reproyecta a él. Rasterizar
+globalmente y recortar daría exactamente los mismos píxeles.
+
+Pendiente y rugosidad son operadores **locales** (ventana 3x3), así que se leen con `HALO_PX = 2` de
+margen y se recortan: el resultado es idéntico al del stack global. Verificado de punta a punta:
+`test_image_and_mask_share_the_exact_same_grid` compara `transform`, CRS y tamaño de las dos
+teselas de cada par.
+
+## D15 — El DTM hay que alinearlo aunque coincida la resolución
+
+La especificación supone que «el DTM de ODM suele venir a menor resolución que la orto». **En esta
+instancia no es cierto**, y aun así hay que alinear. Medido:
+
+```
+                orto            DTM
+mina    0,0635 m, 17128x22084   0,0635 m, 17128x22083
+origen  Y = 7 036 379,596       Y = 7 036 379,557      -> 3,8 cm = 0,6 px de desfase
+```
+
+Misma resolución, misma anchura, **una fila menos y el origen corrido medio píxel**. Leer el DTM con
+`read(window=...)` habría metido ese corrimiento en todas las teselas: los canales saldrían
+plausibles y sistemáticamente desplazados respecto al RGB. Se reproyecta con
+`rasterio.warp.reproject` bilineal a la rejilla de salida de la tesela, y **después** se derivan los
+canales.
+
+Cobertura: el DTM sintético de la suite se escribe con ese mismo desfase de medio píxel, y
+`test_the_aligned_dtm_lands_on_the_exact_output_grid` comprueba el valor esperado píxel a píxel.
+
+## D16 — El techo de rugosidad se mide a la resolución del dataset
+
+La rugosidad depende de la escala. Medido sobre el DTM de la mina, el p98 de la rugosidad crece
+linealmente al engordar el paso:
+
+```
+paso (m)    0,063   0,127   0,254   0,508   1,016
+p98 TRI     0,202   0,324   0,595   1,157   2,225
+```
+
+Así que estimar el percentil sobre una lectura decimada del ráster entero —lo barato— habría dado un
+techo que no tiene nada que ver con el de 10 cm/px. Se muestrean **24 teselas repartidas por la
+rejilla**, ya alineadas, y se agrupan sus valores. Cuesta ~0,5 s.
+
+## D17 — `float32` por defecto, `uint16` a un flag
+
+La especificación admite las dos. Medido sobre 55 teselas reales de la mina:
+
+```
+float32   3,28 MB/tesela   ->  2,63 GB la mina completa (800 teselas)
+uint16    1,67 MB/tesela   ->  1,34 GB
+```
+
+Se deja `float32` por defecto —es la primera opción del texto y el cargador de entrenamiento no
+tiene que deshacer nada— y `pixel_dtype: "uint16"` está disponible por dataset, con la escala
+declarada en `dataset.json`. La decisión es del usuario y ahora tiene los dos números.
+
+## D18 — El fondo lo crean áreas revisadas, no la ausencia de etiquetas
+
+Es el cambio de fondo de esta entrega. Antes la máscara nacía a 255 y solo lo etiquetado llevaba
+clase; el fondo (0) solo existía si el usuario lo pintaba a mano, cosa que nadie hace sobre media
+mina.
+
+Ahora el anotador dibuja **áreas revisadas** (`kind: "review"`), y dentro de ellas lo que no lleve
+etiqueta es fondo real. Fuera sigue siendo «no lo sé».
+
+Se eligió **zona** y no **estado por tesela** —la especificación permite ambos— porque la rejilla
+depende de la resolución, del tamaño de tesela y del solape, y el usuario puede cambiar los tres; el
+terreno revisado no. Con estado por tesela, tocar el solape invalidaría toda la curación.
+
+La composición de la máscara queda:
+
+```
+mask = 255                       # nadie lo ha mirado
+mask[áreas revisadas] = 0        # mirado y no es camino
+mask[etiquetas por orden] = clase o 255
+mask[sin datos de vuelo] = 255   # no hay nada que mirar
+```
+
+## D19 — Split por bloques con pasillo
+
+Reparto aleatorio por tesela **prohibido**: con 64 px de solape, una tesela de train y su vecina de
+val comparten píxeles literales. Se reparten bloques enteros, y además se descarta toda tesela de
+train que solape con un bloque de val. Con eso la propiedad «ningún píxel de validación aparece en
+el entrenamiento» se puede afirmar sin matices, y `test_no_val_tile_overlaps_a_train_tile` la
+comprueba sobre las extensiones reales, no sobre los índices.
+
+El alcance del pasillo se deriva del solape (`ceil(tile/stride) - 1`), así que sin solape vale 0 y
+el caso se resuelve solo.
+
+Dos desenlaces que hubo que separar tras verlos fallar:
+
+- **Sin teselas de train no hay paquete.** Pasa cuando la zona revisada da para pocos bloques y
+  todos son vecinos del de val. Medido sobre una rejilla de 5x5 con bloques de 4: ocurre en el
+  **24 % de las semillas**. Se falla con un mensaje que dice qué bajar.
+- **Sin teselas de val sí hay paquete**, con el aviso escrito en `dataset.json`. Una zona revisada
+  única no da para validación, y eso no invalida las teselas.
+
+La comprobación se repite **sobre lo escrito** y no solo sobre las candidatas: el umbral de píxeles
+válidos tumba teselas después del reparto, y no al azar sino allí donde no hay datos de vuelo.
+
+## D20 — Solape como fracción, no como valor fijo
+
+64 px sobre 512 es 1/8. Guardado como valor fijo, un dataset con teselas de 64 px heredaba 64 px de
+solape, o sea **paso de 1 px** y una rejilla de decenas de miles de teselas sobre el mismo sitio.
+El defecto se expresa como fracción del lado y se acota a `tile_size - 1`.
+
+## D21 — La rugosidad no es el TRI: es el residuo del plano local
+
+**Desviación de la especificación, medida antes de decidirla.**
+
+El TRI de Riley (media de `|centro - vecino|`) sobre una superficie lisa pero inclinada no vale
+cero: vale `0,75 x pendiente x paso`. O sea que sobre terreno inclinado **el TRI mide sobre todo la
+pendiente**. Medido en el DTM real de la mina, a 10 cm/px sobre una ventana de 1 900 px de lado:
+
+```
+canal            p50       p98     corr. con la pendiente
+pendiente     27,28°    73,93°           +1,000
+TRI           0,0416 m  0,2609 m         +0,907
+residuo       0,0132 m  0,0732 m         +0,750
+```
+
+Con r = 0,907, el **82 % de la varianza del TRI ya la explica la banda 4**: sería una quinta banda
+que repite la cuarta, que es justo el motivo por el que la propia especificación descarta el
+hillshade por «redundante con slope».
+
+Se calcula en su lugar el **RMS del residuo respecto al plano de mínimos cuadrados de la ventana
+3x3**. Vale exactamente cero sobre cualquier plano, esté inclinado o no, así que mide falta de
+planitud y no pendiente. Aporta un 44 % de información propia frente al 18 % del TRI.
+
+La definición va escrita en `dataset.json` (`normalization.bands[4].definition`) para que la
+inferencia la reproduzca sin adivinar.
+
+## D22 — Elevación relativa antes de remuestrear
+
+Los DTM de ODM son `float32` y la mina está a **4 100 m**: ahí el paso de representación es
+`4100 x 2^-23 = 0,49 mm`, y el remuestreo bilineal acumula sobre eso. Medido en la suite sobre un
+plano perfecto, el ruido de fila a fila era de **2 mm** — del orden de la propia rugosidad que hay
+que medir (p50 real: 13 mm).
+
+`read_aligned` resta la media de la ventana **antes** de reproyectar. No se pierde nada porque
+ningún canal usa la cota absoluta, y el ruido baja de 2 mm a menos de 1 µm
+(`test_every_row_holds_the_same_value`, tolerancia 1e-6).
+
+## D23 — Lo derivado de relleno no es válido
+
+El halo de una tesela pegada al borde del DTM cae fuera del ráster y se rellena. El escalón
+artificial entre el terreno y el relleno producía un pico de rugosidad **saturado** en la primera
+fila y la primera columna de esas teselas: una retícula de líneas brillantes en la banda 5, visible
+solo en el perímetro, del tipo que se confunde con textura real.
+
+Se erosiona la validez un píxel —un píxel sobrevive solo si sus ocho vecinos son válidos— y las
+cinco bandas se ponen a cero donde no hay dato. La máscara ya mandaba esos píxeles a «ignorar», pero
+la máscara solo controla la **pérdida**: el píxel seguía entrando en la convolución.
