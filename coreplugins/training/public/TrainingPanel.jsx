@@ -2,8 +2,10 @@ import React from 'react';
 import PropTypes from 'prop-types';
 import ErrorMessage from 'webodm/components/ErrorMessage';
 import { _ } from 'webodm/classes/gettext';
-import LabelEditor, { MODE_NONE, MODE_POLYGON, MODE_BRUSH, MODE_ERASER, MODE_REVIEW, MODE_SELECT }
+import LabelEditor, { MODE_NONE, MODE_POLYGON, MODE_BRUSH, MODE_ERASER, MODE_REVIEW, MODE_SELECT,
+                      MODE_ASSIST }
   from './LabelEditor';
+import AssistLayer from './assistLayer';
 import { createLabelLayer } from './labelLayer';
 import { shouldRebuildEditor } from './panelLifecycle';
 import { shouldDeleteSelected } from './deleteShortcut';
@@ -46,7 +48,12 @@ export default class TrainingPanel extends React.Component {
       labels: [],
       saving: false,
       exports: [],
-      selectedIds: []
+      selectedIds: [],
+      // Ajustes de selección asistida. Se copian del dataset al cargarlo y se devuelven a él al
+      // cambiarlos: describen cómo se etiqueta ese terreno, no una preferencia de esta pestaña, así
+      // que quien vuelva mañana tiene que encontrar lo que dejó (FR-022).
+      assist: {granularity: 'medium', tolerance: 0, elevation_weight: 1},
+      assistStatus: null
     };
   }
 
@@ -101,6 +108,10 @@ export default class TrainingPanel extends React.Component {
     return `${this.apiBase()}/datasets/${this.state.datasetId}/tasks/${this.task().id}/labels${suffix}`;
   }
 
+  regionsUrl(){
+    return `${this.apiBase()}/datasets/${this.state.datasetId}/tasks/${this.task().id}/regions`;
+  }
+
   dataset(){
     return this.state.datasets.find(d => d.id === this.state.datasetId) || null;
   }
@@ -114,9 +125,12 @@ export default class TrainingPanel extends React.Component {
         const taskId = String(this.task().id);
         const mine = (datasets || []).filter(d =>
           (d.tasks || []).some(t => String(t.task_id) === taskId));
+        const datasetId = mine.length ? (this.state.datasetId || mine[0].id) : null;
+        const active = mine.find(d => d.id === datasetId);
         this.setState({
           datasets: mine,
-          datasetId: mine.length ? (this.state.datasetId || mine[0].id) : null,
+          datasetId: datasetId,
+          assist: (active && active.assist) || this.state.assist,
           loading: false
         });
       })
@@ -130,6 +144,20 @@ export default class TrainingPanel extends React.Component {
     this.layer = createLabelLayer(this.props.map, {onSelect: this.selectLabel});
     this.layer.setClasses(this.dataset() ? this.dataset().classes : []);
 
+    this.assist = new AssistLayer({
+      map: this.props.map,
+      regionsUrl: () => this.regionsUrl(),
+      settings: () => this.state.assist,
+      classes: this.dataset() ? this.dataset().classes : [],
+      classIndex: this.state.classIndex,
+      onCreate: this.createLabel,
+      onStatus: status => this.setState({assistStatus: status}),
+      onError: payload => this.setState({
+        assistStatus: null,
+        error: (payload && payload.error) || _("Could not compute the region.")
+      })
+    });
+
     this.editor = new LabelEditor({
       map: this.props.map,
       classes: this.dataset() ? this.dataset().classes : [],
@@ -137,6 +165,10 @@ export default class TrainingPanel extends React.Component {
       radiusM: this.state.widthM / 2,
       hardNegative: this.state.hardNegative,
       onCreate: this.createLabel,
+      // La selección asistida no produce geometría por sí sola: el editor entrega los puntos que el
+      // usuario señaló y `assistLayer` los convierte en regiones contra el servidor.
+      onAssistPreview: points => this.assist && this.assist.previewPoints(points),
+      onAssist: points => this.assist && this.assist.commitPoints(points),
       // Escape suelta la herramienta: el panel es quien manda sobre el modo, así que el editor
       // avisa en vez de cambiarlo por su cuenta y dejar los botones desincronizados.
       onExitMode: () => this.setMode(MODE_NONE)
@@ -295,7 +327,9 @@ export default class TrainingPanel extends React.Component {
 
   teardownEditor(){
     this.stopExportPolling();
+    if (this.assistTimer){ clearTimeout(this.assistTimer); this.assistTimer = null; }
     if (this.editor){ this.editor.remove(); this.editor = null; }
+    if (this.assist){ this.assist.remove(); this.assist = null; }
     if (this.layer){ this.layer.remove(); this.layer = null; }
   }
 
@@ -349,7 +383,37 @@ export default class TrainingPanel extends React.Component {
     const classIndex = parseInt(e.target.value, 10);
     this.setState({classIndex});
     if (this.editor) this.editor.setClassIndex(classIndex);
+    if (this.assist) this.assist.setClassIndex(classIndex);
   };
+
+  // --- Selección asistida (`010`) ------------------------------------------------------
+
+  /**
+   * Cambia uno de los tres ajustes de asistencia y lo persiste en el dataset.
+   *
+   * El estado local se actualiza al momento —el control tiene que responder— y el guardado va con
+   * retardo: un deslizador dispara un evento por píxel, y sin freno cada arrastre mandaría decenas
+   * de PATCH sobre el mismo documento, todos bajo el mismo advisory lock.
+   *
+   * **Cambiarlos no toca ninguna etiqueta ya guardada** (FR-023): describen cómo se calculará lo
+   * siguiente, no lo que el usuario ya decidió.
+   */
+  setAssist = (partial) => {
+    const assist = Object.assign({}, this.state.assist, partial);
+    this.setState({assist});
+    if (this.assistTimer) clearTimeout(this.assistTimer);
+    this.assistTimer = setTimeout(() => this.persistAssist(assist), 400);
+  };
+
+  persistAssist(assist){
+    if (!this.state.datasetId) return;
+    $.ajax({url: `${this.apiBase()}/datasets/${this.state.datasetId}`, type: 'PATCH',
+            contentType: 'application/json', data: JSON.stringify({assist})})
+      .done(saved => this.setState(prev => ({
+        datasets: prev.datasets.map(d => d.id === saved.id ? saved : d)
+      })))
+      .fail(() => this.setState({error: _("Could not save the assist settings.")}));
+  }
 
   setWidth = (e) => {
     const widthM = parseFloat(e.target.value);
@@ -383,14 +447,18 @@ export default class TrainingPanel extends React.Component {
   };
 
   setDataset = (e) => {
-    this.setState({datasetId: e.target.value || null});
+    const datasetId = e.target.value || null;
+    const chosen = this.state.datasets.find(d => d.id === datasetId);
+    // Los ajustes de asistencia son del dataset, así que cambiar de dataset trae los suyos. Sin
+    // esto, los del anterior se aplicarían al nuevo y el primer PATCH los grabaría encima.
+    this.setState({datasetId, assist: (chosen && chosen.assist) || this.state.assist});
   };
 
   render(){
     if (!this.props.isShowed) return (<div/>);
 
     const { datasets, datasetId, classIndex, mode, widthM, hardNegative,
-            labels, loading, exports } = this.state;
+            labels, loading, exports, assist, assistStatus } = this.state;
     const chosen = this.selectedLabels();
     const selected = chosen.length === 1 ? chosen[0] : null;
     const reassignable = chosen.filter(l => l.kind !== 'review').length;
@@ -455,6 +523,15 @@ export default class TrainingPanel extends React.Component {
                   onClick={() => this.setMode(MODE_BRUSH)}
                   title={_("Paint with a brush of the radius below.")}>
             <i className="fa fa-paint-brush"/> {_("Brush")}
+          </button>
+          {/* La selección asistida va junto al pincel porque es su alternativa directa: el mismo
+              gesto, pero siguiendo el borde real en vez de un ancho fijo. No usa Shift para nada
+              (FR-002): Shift sigue siendo selección múltiple en toda la interfaz. */}
+          <button type="button"
+                  className={'btn btn-sm ' + (mode === MODE_ASSIST ? 'btn-primary' : 'btn-default')}
+                  onClick={() => this.setMode(MODE_ASSIST)}
+                  title={_("Click the ground and the tool follows the visible edge for you.")}>
+            <i className="fa fa-wand-magic-sparkles"/> {_("Assisted")}
           </button>
           <button type="button"
                   className={'btn btn-sm ' + (mode === MODE_ERASER ? 'btn-primary' : 'btn-default')}
@@ -551,6 +628,64 @@ export default class TrainingPanel extends React.Component {
             {' '}
             {_("The width is measured on the ground and stays constant as you zoom.")}
           </div>
+        </div>}
+
+        {mode === MODE_ASSIST && <div className="row-field assist">
+          <div className="hint">
+            {_("Click a road and the tool selects the region under it, following the visible edge. Drag to take in several.")}
+          </div>
+
+          <label>{_("Detail")}</label>
+          <select className="form-control" value={assist.granularity}
+                  onChange={e => this.setAssist({granularity: e.target.value})}>
+            <option value="fine">{_("Fine — small regions, more clicks")}</option>
+            <option value="medium">{_("Medium")}</option>
+            <option value="coarse">{_("Coarse — large regions, fewer clicks")}</option>
+          </select>
+
+          <label>{_("Spread")}: {Math.round(assist.tolerance * 100)}%</label>
+          <input type="range" min="0" max="1" step="0.02" value={assist.tolerance}
+                 onChange={e => this.setAssist({tolerance: parseFloat(e.target.value)})}/>
+          <div className="hint">
+            {_("At zero a click takes exactly one region. Raise it to take in the similar ground around it, up to the nearest edge.")}
+          </div>
+
+          <label>{_("Terrain weight")}: {Math.round(assist.elevation_weight * 100)}%</label>
+          <input type="range" min="0" max="1" step="0.05" value={assist.elevation_weight}
+                 onChange={e => this.setAssist({elevation_weight: parseFloat(e.target.value)})}/>
+          <div className="hint">
+            {/* El cero no es «sin valor» sino una elección: hay terreno donde el relieve no aporta
+                nada y sí ruido, y ahí la herramienta trabaja mejor solo con color (FR-013). */}
+            {_("Slope and roughness help where the road is level but its surroundings are not. Lower it to zero where the relief adds nothing.")}
+          </div>
+
+          {/* Preparar una celda cuesta cerca de un segundo. Anunciarlo es lo que separa «está
+              trabajando» de «no ha registrado el clic» (FR-024). */}
+          {assistStatus && assistStatus.busy &&
+            <div className="hint assist-busy">
+              <i className="fa fa-circle-notch fa-spin"/>{' '}
+              {_("Preparing this area…")}
+            </div>}
+
+          {assistStatus && assistStatus.truncated &&
+            <div className="warning">
+              <i className="fa fa-exclamation-triangle"/>{' '}
+              {_("The spread hit its limit and stopped: there is more similar ground beyond what was selected.")}
+            </div>}
+
+          {assistStatus && assistStatus.empty && assistStatus.message &&
+            <div className="hint">{assistStatus.message}</div>}
+
+          {/* Trabajar sin terreno es un modo de uso, no un fallo, pero el usuario tiene que
+              saberlo: la herramienta se comporta distinto y él no ha cambiado nada (FR-011). */}
+          {assistStatus && assistStatus.elevationSource === 'none' && assist.elevation_weight > 0 &&
+            <div className="hint">
+              {_("This task has no terrain model: the tool is working from colour alone.")}
+            </div>}
+          {assistStatus && assist.elevation_weight === 0 &&
+            <div className="hint">
+              {_("Terrain channels are off because you set the weight to zero.")}
+            </div>}
         </div>}
 
         {mode === MODE_REVIEW && <div className="row-field">

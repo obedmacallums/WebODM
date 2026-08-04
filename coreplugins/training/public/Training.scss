@@ -169,6 +169,37 @@
     white-space: normal;
   }
 
+  // Los avisos se leen distinto de las pistas: uno describe la herramienta y el otro dice que algo
+  // no ha salido como se pedía. Con el mismo gris se confundían, y el de «sin área revisada» —del
+  // que depende que la exportación produzca algo— pasaba desapercibido.
+  .warning{
+    font-size: 11px;
+    color: #8a6d3b;
+    background: #fcf8e3;
+    border: 1px solid #faebcc;
+    border-radius: 3px;
+    padding: 4px 6px;
+    margin-top: 4px;
+    white-space: normal;
+  }
+
+  // Los tres ajustes de la selección asistida van agrupados: son de la herramienta activa, no del
+  // dataset entero, y sueltos entre los demás campos parecían ajustes globales.
+  .assist{
+    border: 1px solid #ddd;
+    border-radius: 3px;
+    padding: 6px;
+    background: #fafafa;
+
+    label{
+      margin-top: 6px;
+    }
+
+    .assist-busy{
+      color: #31708f;
+    }
+  }
+
   .selection{
     border: 1px solid #ddd;
     border-radius: 3px;

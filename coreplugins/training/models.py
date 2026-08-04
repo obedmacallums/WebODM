@@ -55,6 +55,25 @@ KINDS = (KIND_POLYGON, KIND_STROKE, KIND_REVIEW)
 SOURCE_MANUAL = 'manual'
 SOURCE_IMPORT = 'import'
 SOURCE_MODEL = 'model'
+# Etiqueta creada por selección asistida (`010`). Es una etiqueta corriente en todo lo demás —
+# `kind` sigue siendo `polygon`— y por eso el contrato del paquete exportado no cambia. La marca
+# sirve para poder medir más adelante la calidad de la asistencia sin volver a etiquetar, y deja
+# `SOURCE_MODEL` libre para lo que sí produce un modelo (fase 3 de `009`).
+SOURCE_ASSISTED = 'assisted'
+SOURCES = (SOURCE_MANUAL, SOURCE_IMPORT, SOURCE_MODEL, SOURCE_ASSISTED)
+# Las que un cliente puede declarar. Ver `validate_source`.
+CLIENT_SOURCES = (SOURCE_MANUAL, SOURCE_ASSISTED)
+
+# --- Ajustes de selección asistida (`010`) -----------------------------------------------
+#
+# Los nombres se definen aquí y los píxeles de paso que les corresponden en `superpixels.py`. La
+# separación es a propósito: este módulo lo importan la API y el exportador y tiene que poder
+# cargarse sin rasterio ni scikit-image, que es justo lo que `superpixels` arrastra.
+# `tests/test_superpixels.py` comprueba que las dos listas no se separen.
+GRANULARITIES = ('fine', 'medium', 'coarse')
+DEFAULT_GRANULARITY = 'medium'
+DEFAULT_TOLERANCE = 0.0          # 0 selecciona exactamente una región
+DEFAULT_ELEVATION_WEIGHT = 1.0   # 0 desactiva los canales de terreno
 
 # Paleta por defecto de las clases. Evita deliberadamente la escala verde/amarillo/rojo con la que
 # `road` pinta la pendiente (FR-007): un usuario con los dos plugins abiertos sobre el mismo mapa
@@ -210,6 +229,7 @@ def make_dataset(name, classes, tasks, resolution_cm_px=None, tile_size_px=None,
         'pixel_dtype': dtype,
         'classes': normalize_classes(classes),
         'tasks': normalize_tasks(tasks),
+        'assist': default_assist(),
         'min_reviewed_fraction': validate_fraction(min_reviewed_fraction, DEFAULT_MIN_REVIEWED_FRACTION,
                                            'min_reviewed_fraction'),
         'min_valid_fraction': validate_fraction(min_valid_fraction, DEFAULT_MIN_VALID_FRACTION,
@@ -273,6 +293,72 @@ def validate_fraction(value, default, field):
     return number
 
 
+def validate_source(value):
+    """Procedencia declarada por el cliente al crear una etiqueta.
+
+    Solo se aceptan las dos que un cliente puede producir de verdad: a mano o con la selección
+    asistida. `import` y `model` las escribe el servidor, y dejar que el navegador las declarase
+    permitiría marcar como salida de un modelo algo dibujado a mano — o al revés. La procedencia
+    solo vale para algo si no se puede falsear.
+    """
+    source = str(value or SOURCE_MANUAL).strip().lower()
+    if source not in CLIENT_SOURCES:
+        raise ValidationError(
+            'La procedencia debe ser una de {}.'.format(', '.join(CLIENT_SOURCES)), 'bad_source')
+    return source
+
+
+def default_assist():
+    """Ajustes de selección asistida por defecto (`010/data-model.md`)."""
+    return {
+        'granularity': DEFAULT_GRANULARITY,
+        'tolerance': DEFAULT_TOLERANCE,
+        'elevation_weight': DEFAULT_ELEVATION_WEIGHT,
+    }
+
+
+def normalize_assist(raw, current=None):
+    """Valida el bloque `assist` de un dataset y devuelve uno completo.
+
+    `current` permite aplicar un cambio parcial —la interfaz mueve un control cada vez— sin que los
+    otros dos ajustes se pierdan por no venir en la petición.
+
+    **Ninguno de los tres toca las etiquetas ya guardadas** (FR-023): describen cómo se calcularán
+    las selecciones siguientes, no lo que el usuario ya decidió. Cambiarlos sí invalida la caché de
+    mapas de regiones, pero eso sale gratis: los tres forman parte de la clave.
+    """
+    assist = dict(current or default_assist())
+    if raw is None:
+        return assist
+    if not isinstance(raw, dict):
+        raise ValidationError('Los ajustes de asistencia deben ser un objeto.', 'bad_settings')
+
+    if 'granularity' in raw and raw['granularity'] is not None:
+        granularity = str(raw['granularity']).strip().lower()
+        if granularity not in GRANULARITIES:
+            raise ValidationError(
+                'La granularidad debe ser una de {}.'.format(', '.join(GRANULARITIES)),
+                'bad_settings')
+        assist['granularity'] = granularity
+
+    for field in ('tolerance', 'elevation_weight'):
+        if field in raw and raw[field] is not None:
+            assist[field] = validate_unit_interval(raw[field], field)
+
+    return assist
+
+
+def validate_unit_interval(value, field):
+    """Número en `[0, 1]`, o `ValidationError` con el código que fija el contrato."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValidationError('{} debe ser un número entre 0 y 1.'.format(field), 'bad_settings')
+    if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+        raise ValidationError('{} debe ser un número entre 0 y 1.'.format(field), 'bad_settings')
+    return number
+
+
 def normalize_tasks(raw):
     """Lista de referencias a tareas del core (`data-model.md` §Tarea del dataset).
 
@@ -330,6 +416,9 @@ def with_defaults(dataset):
     dataset.setdefault('val_fraction', DEFAULT_VAL_FRACTION)
     dataset.setdefault('split_block_tiles', DEFAULT_SPLIT_BLOCK_TILES)
     dataset.setdefault('stroke_width_m', DEFAULT_STROKE_WIDTH_M)
+    # Un dataset creado antes de `010` no tiene el bloque. Se completa al leer, como todo lo demás:
+    # el documento en disco sigue siendo el registro de lo que el usuario decidió.
+    dataset['assist'] = normalize_assist(dataset.get('assist'), default_assist())
 
     if dataset.get('schema_version', 1) < 2:
         # El umbral de píxeles válidos sube de 0,50 a 0,80 (FR-027): «como mucho un 20 % sin

@@ -82,3 +82,56 @@ def _would_shadow(generic, later):
             continue
         return False
     return True
+
+
+class AssistIsolationTest(TestCase):
+    """La selección asistida no puede tumbar al resto del plugin (`010`, FR-026, Principio III).
+
+    Es la única parte del plugin que depende de un paquete instalado por el framework, y ese paquete
+    puede faltar de verdad: un arranque en el que `check_requirements()` no llegó a correr, un
+    `site-packages` a medio instalar, un merge de upstream que mueva numpy. Lo que se afirma aquí es
+    que en ese estado el plugin **sigue cargando y sigue etiquetando a mano**.
+    """
+
+    def test_importing_superpixels_does_not_import_skimage(self):
+        """`skimage` se resuelve al primer uso, no al cargar el módulo.
+
+        Si se importara arriba, el registro del plugin fallaría entero cuando falta y WebODM lo
+        desactivaría (`register_plugins` llama a `disable_plugin` ante cualquier excepción). Con la
+        carga diferida, lo que falta es una herramienta, no el plugin.
+        """
+        import ast
+        import os
+
+        source = os.path.join(PLUGIN_DIR, 'superpixels.py')
+        with open(source) as f:
+            tree = ast.parse(f.read())
+
+        top_level = []
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                top_level += [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                top_level.append(node.module or '')
+
+        self.assertNotIn('skimage', [name.split('.')[0] for name in top_level],
+                         'skimage debe importarse dentro de `slic_function()`, no en la cabecera')
+
+    def test_the_plugin_registers_without_the_optional_dependency(self):
+        from coreplugins.training import api, plugin, regions, superpixels  # noqa: F401
+
+        self.assertIsNotNone(get_plugin_by_name('training'))
+        self.assertTrue(any('regions$' in mp.url for mp in plugin_mount_urls_objects()))
+
+    def test_a_missing_dependency_becomes_a_declared_error(self):
+        """No un 500: la interfaz tiene que poder esconder la herramienta y seguir."""
+        from coreplugins.training import api
+
+        response = api.assist_unavailable(ImportError('No module named skimage'))
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data['code'], 'assist_unavailable')
+        self.assertIn('mano', response.data['error'])
+
+
+def plugin_mount_urls_objects():
+    return get_plugin_by_name('training').api_mount_points()

@@ -45,6 +45,12 @@ export const MODE_ERASER = 'eraser';
 // revisada, lo que no lleve etiqueta pasa a ser fondo real (0) en vez de «no lo sé» (255).
 export const MODE_REVIEW = 'review';
 export const MODE_SELECT = 'select';
+// Selección asistida (`010`). El gesto es el del pincel —pulsar, arrastrar, soltar— pero lo que
+// produce no es geometría: son los puntos del terreno que el usuario ha señalado. La región que
+// corresponde a cada punto la calcula el servidor, así que este editor **no** construye la etiqueta;
+// emite el gesto y `assistLayer.js` se encarga del resto. Mezclar aquí la red habría hecho que el
+// editor dependiera de un dataset y de una tarea, que es justo lo que no sabe.
+export const MODE_ASSIST = 'assist';
 
 /**
  * Vértices de una capa, sea polígono o polilínea.
@@ -75,6 +81,10 @@ export default class LabelEditor {
     this.onCreate = options.onCreate || function(){};
     this.onSelect = options.onSelect || function(){};
     this.onExitMode = options.onExitMode || function(){};
+    // Gesto de selección asistida: `onAssistPreview` va llegando mientras se arrastra y `onAssist`
+    // una sola vez al soltar. Los dos reciben la lista de puntos `[lon, lat]` acumulada.
+    this.onAssist = options.onAssist || function(){};
+    this.onAssistPreview = options.onAssistPreview || function(){};
     this.pluginsAPI = options.pluginsAPI || (typeof PluginsAPI !== 'undefined' ? PluginsAPI : null);
 
     this.mode = MODE_NONE;
@@ -187,10 +197,20 @@ export default class LabelEditor {
 
   isActive(){
     return this.mode === MODE_POLYGON || this.mode === MODE_BRUSH ||
-           this.mode === MODE_ERASER || this.mode === MODE_REVIEW;
+           this.mode === MODE_ERASER || this.mode === MODE_REVIEW ||
+           this.mode === MODE_ASSIST;
   }
 
   isBrush(){ return this.mode === MODE_BRUSH || this.mode === MODE_ERASER; }
+
+  /**
+   * Selección asistida.
+   *
+   * **No** es `isBrush()` aunque el gesto se parezca: el pincel produce una polilínea con radio y
+   * este produce una lista de puntos que el servidor convierte en regiones. Meterlo en `isBrush()`
+   * habría hecho que `finish()` fabricara un `stroke` con el rastro del cursor.
+   */
+  isAssist(){ return this.mode === MODE_ASSIST; }
 
   /** Los dos modos que se dibujan clic a clic cerrando un anillo. */
   isRing(){ return this.mode === MODE_POLYGON || this.mode === MODE_REVIEW; }
@@ -264,6 +284,16 @@ export default class LabelEditor {
   // --- Pincel y borrador ---------------------------------------------------------------
 
   _onMouseDown(e){
+    // La selección asistida usa el mismo gesto que el pincel, así que un clic suelto también pasa
+    // por aquí y por `_onMouseUp`: no hace falta tocar `_onClick`, y de hecho no debe tocarse, o un
+    // clic contaría dos veces.
+    if (this.isAssist()){
+      this.drawing = true;
+      this.points = [];
+      this._pushPoint(e.latlng);
+      this.onAssistPreview(this.points.slice());
+      return;
+    }
     if (!this.isBrush()) return;
     this.drawing = true;
     this.points = [];
@@ -272,6 +302,13 @@ export default class LabelEditor {
   }
 
   _onMouseMove(e){
+    if (this.drawing && this.isAssist()){
+      if (this._farEnough(e.latlng)){
+        this._pushPoint(e.latlng);
+        this.onAssistPreview(this.points.slice());
+      }
+      return;
+    }
     if (this.drawing && this.isBrush()){
       if (this._farEnough(e.latlng)) {
         this._pushPoint(e.latlng);
@@ -328,7 +365,7 @@ export default class LabelEditor {
   }
 
   _onMouseUp(){
-    if (!this.drawing || !this.isBrush()) return;
+    if (!this.drawing || !(this.isBrush() || this.isAssist())) return;
     this.drawing = false;
     this.finish();
   }
@@ -401,6 +438,11 @@ export default class LabelEditor {
   }
 
   _updatePreview(){
+    // En selección asistida la previsualización es la región que devuelve el servidor, y la pinta
+    // `assistLayer`. Dibujar además el rastro del cursor sería enseñar dos cosas distintas a la vez
+    // y sugerir que lo que se etiqueta es la línea.
+    if (this.isAssist()) return;
+
     const latlngs = this.points.map(p => [p[1], p[0]]);
     if (latlngs.length < 2) return;
 
@@ -441,6 +483,15 @@ export default class LabelEditor {
    * es lo normal cuando el usuario hace clic sin arrastrar.
    */
   finish(){
+    if (this.isAssist()){
+      // Un solo punto ya vale: el gesto normal de esta herramienta es un clic, no un arrastre.
+      const points = this.points.slice();
+      this._cancel();
+      if (!points.length) return null;
+      this.onAssist(points);
+      return {kind: 'assist', points: points};
+    }
+
     const kind = this.isBrush() ? 'stroke' : (this.mode === MODE_REVIEW ? 'review' : 'polygon');
     const minimum = kind === 'stroke' ? 2 : 3;
 

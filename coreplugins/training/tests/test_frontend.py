@@ -55,3 +55,6 @@ class FrontendUnitTest(SimpleTestCase):
 
     def test_panel_rebuilds_its_editor_when_reopened(self):
         self._run_js('panelLifecycle.test.js')
+
+    def test_assisted_selection_does_not_disturb_the_other_modes(self):
+        self._run_js('assistMode.test.js')

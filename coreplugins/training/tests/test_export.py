@@ -562,3 +562,83 @@ class ProgressTest(ExportTestBase):
         directory = export.exports_dir(self.dataset['id'])
         leftovers = os.listdir(directory) if os.path.isdir(directory) else []
         self.assertEqual(leftovers, [])
+
+
+class AssistedLabelExportTest(ExportTestBase):
+    """El paquete no cambia porque una etiqueta venga de la selección asistida (`010`, FR-020).
+
+    Es el contrato más caro de romper del plugin: lo consume a ciegas otra máquina. La feature `010`
+    no le da ningún motivo para cambiar —produce etiquetas `polygon`, que ya existían— y esto es lo
+    que lo afirma en vez de darlo por supuesto.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._review_all(self.dataset, self.task)
+
+    def _mixed_labels(self):
+        """Una etiqueta a mano y otra asistida sobre terreno distinto, misma clase."""
+        self._add_label(self.dataset, self.task, class_index=1, geometry=square(2, 2, 5))
+        store.add_label(
+            self.dataset['id'], str(self.task.id),
+            lambda order: models.make_label(
+                self.dataset, {'kind': models.KIND_POLYGON, 'class_index': 1,
+                               'geometry': square(9, 2, 5)},
+                order, source=models.SOURCE_ASSISTED))
+
+    def test_the_package_has_no_trace_of_the_label_source(self):
+        """SC-008: el consumidor del paquete no puede distinguir una etiqueta de la otra."""
+        self._mixed_labels()
+        archive, metadata = self.open_package(self.run_export())
+
+        self.assertNotIn('assisted', json.dumps(metadata),
+                         'la procedencia de las etiquetas no pertenece al paquete: es un detalle '
+                         'de cómo se dibujaron, no de qué contiene el dataset')
+
+        # `source` sí aparece en el paquete, pero hablando de otra cosa: `elevation_source`,
+        # `source_tasks` y el origen de cada banda. Lo que no puede aparecer es la procedencia de
+        # una **etiqueta**, así que se mira dónde viviría: en la entrada de cada tesela.
+        for entry in metadata['tiles']:
+            self.assertNotIn('source', entry)
+            self.assertNotIn('label_source', entry)
+
+    def test_an_assisted_label_rasterises_like_a_manual_one(self):
+        """Las dos son polígonos de la clase 1, así que las dos tienen que salir como 1."""
+        self._mixed_labels()
+        archive, metadata = self.open_package(self.run_export())
+
+        painted = set()
+        for entry in metadata['tiles']:
+            mask, _, _, _, _ = read_raster(archive, entry['mask'])
+            painted.update(np.unique(mask).tolist())
+
+        self.assertIn(1, painted, 'la clase 1 debe aparecer en alguna máscara')
+        self.assertTrue(painted <= {0, 1, models.IGNORE_INDEX},
+                        'valores inesperados en las máscaras: {}'.format(sorted(painted)))
+
+    def test_the_source_does_not_change_a_single_byte_of_the_masks(self):
+        """La comprobación directa: la misma geometría, exportada con las dos procedencias.
+
+        Si el exportador llegara a mirar `source` alguna vez, esto se pondría rojo. Es lo que hace
+        que FR-020 siga siendo cierto dentro de un año y no solo hoy.
+        """
+        geometry = square(4, 4, 8)
+
+        self._add_label(self.dataset, self.task, class_index=1, geometry=geometry)
+        manual = self.open_package(self.run_export())
+
+        for label in store.list_labels(self.dataset['id'], str(self.task.id)):
+            if label['kind'] == models.KIND_POLYGON:
+                store.delete_label(self.dataset['id'], str(self.task.id), label['id'])
+        store.add_label(
+            self.dataset['id'], str(self.task.id),
+            lambda order: models.make_label(
+                self.dataset, {'kind': models.KIND_POLYGON, 'class_index': 1,
+                               'geometry': geometry},
+                order, source=models.SOURCE_ASSISTED))
+        assisted = self.open_package(self.run_export())
+
+        for entry in manual[1]['tiles']:
+            self.assertEqual(manual[0].read(entry['mask']), assisted[0].read(entry['mask']),
+                             'la máscara de {} cambió al marcar la etiqueta como asistida'.format(
+                                 entry['mask']))

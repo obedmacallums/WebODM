@@ -194,6 +194,79 @@ class DatasetApiTest(TrainingTestBase):
         self.assertEqual(self.client.delete(self._api('datasets', hidden['id'])).status_code, 404)
 
 
+class AssistSettingsTest(TrainingTestBase):
+    """Ajustes de selección asistida en el dataset (`010`, T008 y T049).
+
+    Los tres viven en el dataset y no en el navegador porque describen cómo se etiqueta ese terreno,
+    no una preferencia de sesión: quien vuelve al día siguiente encuentra lo que dejó (FR-022).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.task = self._task_with_orthophoto()
+        self.dataset = self._create_dataset(self.task)
+        self._login()
+
+    def _patch(self, assist):
+        return self.client.patch(self._api('datasets', self.dataset['id']), {'assist': assist},
+                                 format='json')
+
+    def test_a_new_dataset_has_the_defaults(self):
+        res = self.client.get(self._api('datasets', self.dataset['id']))
+        self.assertEqual(res.data['assist'],
+                         {'granularity': 'medium', 'tolerance': 0.0, 'elevation_weight': 1.0})
+
+    def test_a_dataset_created_before_the_feature_gets_them_on_read(self):
+        """`with_defaults` los rellena al leer, sin reescribir el documento en disco."""
+        store.update_dataset(self.dataset['id'],
+                             lambda d: {k: v for k, v in d.items() if k != 'assist'})
+        res = self.client.get(self._api('datasets', self.dataset['id']))
+        self.assertEqual(res.data['assist']['granularity'], 'medium')
+
+    def test_the_settings_persist(self):
+        self.assertEqual(self._patch({'granularity': 'coarse', 'tolerance': 0.3}).status_code, 200)
+        res = self.client.get(self._api('datasets', self.dataset['id']))
+        self.assertEqual(res.data['assist']['granularity'], 'coarse')
+        self.assertEqual(res.data['assist']['tolerance'], 0.3)
+
+    def test_a_partial_change_keeps_the_others(self):
+        """Mover un control no puede reescribir los otros dos con lo que el navegador recuerde."""
+        self._patch({'granularity': 'fine', 'tolerance': 0.4, 'elevation_weight': 0.5})
+        self._patch({'tolerance': 0.1})
+        res = self.client.get(self._api('datasets', self.dataset['id']))
+        self.assertEqual(res.data['assist'],
+                         {'granularity': 'fine', 'tolerance': 0.1, 'elevation_weight': 0.5})
+
+    def test_an_unknown_granularity_is_rejected(self):
+        res = self._patch({'granularity': 'enorme'})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data['code'], 'bad_settings')
+
+    def test_a_tolerance_out_of_range_is_rejected(self):
+        self.assertEqual(self._patch({'tolerance': 2.0}).data['code'], 'bad_settings')
+
+    def test_an_elevation_weight_out_of_range_is_rejected(self):
+        self.assertEqual(self._patch({'elevation_weight': -1}).data['code'], 'bad_settings')
+
+    def test_zero_elevation_weight_is_valid(self):
+        """El cero no es «sin valor»: es «no quiero canales de terreno» (FR-013)."""
+        self.assertEqual(self._patch({'elevation_weight': 0}).status_code, 200)
+        res = self.client.get(self._api('datasets', self.dataset['id']))
+        self.assertEqual(res.data['assist']['elevation_weight'], 0.0)
+
+    def test_changing_the_settings_does_not_touch_existing_labels(self):
+        """FR-023. Los ajustes describen lo que se va a calcular, no lo que ya se decidió."""
+        label = self._add_label(self.dataset, self.task, class_index=1,
+                                geometry=_square(0, 0, 4))
+        before = store.list_labels(self.dataset['id'], str(self.task.id))
+
+        self._patch({'granularity': 'coarse', 'tolerance': 0.9, 'elevation_weight': 0.0})
+
+        after = store.list_labels(self.dataset['id'], str(self.task.id))
+        self.assertEqual(before, after)
+        self.assertEqual(after[0]['id'], label['id'])
+
+
 def Project_of(test, username):
     from app.models import Project
     from django.contrib.auth.models import User

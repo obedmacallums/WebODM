@@ -57,6 +57,33 @@ sin rebuild de imagen:
 - **geopandas**, **fiona** — los wheels incluyen sus libs nativas.
 - **opencv** (`opencv-python-headless`).
 
+### Declaradas por un plugin
+
+| Paquete | Versión | Plugin | Nota |
+|---|---|---|---|
+| scikit-image | 0.24.0 | `training` | segmentación en superpíxeles (SLIC) para la selección asistida |
+
+**Instalarla obliga a pinear numpy y scipy a las versiones de la imagen**, y esto es lo que hay que
+saber antes de declarar cualquier paquete con extensiones en C:
+
+`app/plugins/plugin_base.py:44` instala con `pip install -U --target <site-packages>` **sin
+`--no-deps`**, y `python_imports()` antepone ese directorio a `sys.path`. O sea que las
+dependencias transitivas del paquete **tapan** a las de la imagen. `scikit-image` pide
+`numpy>=1.23`; sin pin entra numpy 2.x y `rasterio` —compilado contra el numpy de la imagen— deja de
+importarse con `numpy.dtype size changed ... Expected 96 from C header, got 88 from PyObject`.
+Medido y reproducido. Con los pines a las versiones exactas de la imagen (1.26.2 y 1.11.3), pip
+instala copias con la misma ABI y todo convive; el precio son 246 MB duplicados por plugin.
+
+Dos consecuencias operativas:
+
+- **El `requirements.txt` de un plugin no admite comentarios.** `app/plugins/pyutils.py` toma toda
+  línea no vacía como nombre de paquete, así que una línea `#` hace que la verificación posterior
+  falle siempre: aviso `Failed to install requirements.txt` con pip en verde, y reinstalación
+  completa en cada arranque.
+- **Conviene un test que compare los pines con las versiones de la imagen**
+  (`coreplugins/training/tests/test_requirements.py`). Es lo único que avisa cuando un merge de
+  upstream mueve numpy: sin él, la rotura aparece meses después dentro de un worker.
+
 ## Patrones útiles con los rásteres de una tarea
 
 ### Muestreo masivo: leer por ventanas, no punto a punto

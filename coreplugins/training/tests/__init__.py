@@ -25,3 +25,7 @@ from .test_elevation import *    # noqa: F401,F403
 from .test_split import *        # noqa: F401,F403
 from .test_export import *       # noqa: F401,F403
 from .test_frontend import *      # noqa: F401,F403
+from .test_requirements import *  # noqa: F401,F403
+from .test_superpixels import *   # noqa: F401,F403
+from .test_regions_cache import *  # noqa: F401,F403
+from .test_api_regions import *    # noqa: F401,F403

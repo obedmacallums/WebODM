@@ -4,7 +4,7 @@ from django.shortcuts import render
 from django.utils.translation import gettext as _
 
 from .api import (DatasetDetail, DatasetList, ExportDetail, ExportDownload, ExportList,
-                  LabelDetail, LabelList)
+                  LabelDetail, LabelList, RegionSelect, RegionStatus)
 
 
 class Plugin(PluginBase):
@@ -41,6 +41,13 @@ class Plugin(PluginBase):
                        LabelList.as_view()),
             MountPoint('datasets/(?P<dataset_id>[^/.]+)/tasks/(?P<pk>[^/.]+)/labels/'
                        '(?P<label_id>[^/.]+)$', LabelDetail.as_view()),
+            # 'regions/status' es literal y va **antes** que 'regions': el '$' final ya los
+            # distingue, pero el orden mantiene la regla que evita el fallo silencioso de responder
+            # 200 con el cuerpo equivocado.
+            MountPoint('datasets/(?P<dataset_id>[^/.]+)/tasks/(?P<pk>[^/.]+)/regions/status$',
+                       RegionStatus.as_view()),
+            MountPoint('datasets/(?P<dataset_id>[^/.]+)/tasks/(?P<pk>[^/.]+)/regions$',
+                       RegionSelect.as_view()),
             MountPoint('datasets/(?P<dataset_id>[^/.]+)/exports$', ExportList.as_view()),
             # 'download' es literal y va **antes** del patrón de '<export_id>': aunque el '$' final
             # ya los distingue por longitud, el orden mantiene la regla que evita el fallo

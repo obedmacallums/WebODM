@@ -34,7 +34,7 @@ from app.plugins.views import TaskView
 from app.plugins.worker import run_function_async
 
 from . import export as export_module
-from . import models, store
+from . import models, regions, store
 
 # Códigos de error de `contracts/rest-api.md`.
 ERR_NO_ORTHOPHOTO = 'no_orthophoto'
@@ -47,6 +47,11 @@ ERR_EXPORT_NOT_READY = 'export_not_ready'
 ERR_ALL_TILES_FILTERED = 'all_tiles_filtered'
 ERR_NO_REVIEWED_TILES = 'no_reviewed_tiles'
 ERR_NOT_FOUND = 'not_found'
+# Selección asistida (`010/contracts/rest-api.md`).
+ERR_BAD_POINTS = 'bad_points'
+ERR_BAD_SETTINGS = 'bad_settings'
+ERR_BAD_BOUNDS = 'bad_bounds'
+ERR_ASSIST_UNAVAILABLE = 'assist_unavailable'
 
 
 def error(message, code, http_status=status.HTTP_400_BAD_REQUEST, **extra):
@@ -193,6 +198,13 @@ def _patch_settings(current, data):
             data['stroke_width_m'],
             _('El ancho por defecto del trazo debe ser mayor que cero.'), 'bad_stroke_width')
 
+    if 'assist' in data and data['assist'] is not None:
+        # Cambio parcial sobre lo que ya había: la interfaz mueve un control cada vez, y exigir los
+        # tres en cada PATCH haría que tocar la tolerancia reescribiera la granularidad con lo que
+        # el navegador creyera recordar. Ninguno de los tres toca las etiquetas ya guardadas
+        # (FR-023): describen cómo se calcularán las selecciones siguientes.
+        current['assist'] = models.normalize_assist(data['assist'], current.get('assist'))
+
 
 def _load_task_for_write(request, task_id):
     """La tarea, comprobando que el usuario puede **modificar** su proyecto.
@@ -338,10 +350,14 @@ class LabelList(_LabelViewBase):
 
         data = request.data
         try:
+            # La procedencia la declara el cliente pero se valida: solo `manual` y `assisted` son
+            # cosas que un navegador puede producir de verdad (`models.validate_source`).
+            source = models.validate_source(data.get('source'))
             # `make_label` valida antes de tocar el disco, pero el `order` definitivo lo asigna el
             # store dentro del lock: dos usuarios dibujando a la vez no pueden recibir el mismo.
-            label = store.add_label(dataset_id, str(task.id),
-                                    lambda order: models.make_label(dataset, data, order))
+            label = store.add_label(
+                dataset_id, str(task.id),
+                lambda order: models.make_label(dataset, data, order, source=source))
         except models.ValidationError as exc:
             return validation_error(exc)
 
@@ -393,6 +409,185 @@ class LabelDetail(_LabelViewBase):
         if not store.delete_label(dataset_id, str(task.id), label_id):
             raise exceptions.NotFound()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# --- Selección asistida (`010`) ----------------------------------------------------------
+
+def _parse_points(raw):
+    """`[(lng, lat), ...]` a partir del cuerpo de la petición.
+
+    Un punto es un clic (US1) y varios son un arrastre (US2): el backend no distingue los dos
+    gestos, y por eso no hay dos endpoints.
+    """
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise models.ValidationError(_('Hace falta al menos un punto.'), ERR_BAD_POINTS)
+
+    points = []
+    for item in raw:
+        if isinstance(item, dict):
+            lng = item.get('lon', item.get('lng', item.get('longitude')))
+            lat = item.get('lat', item.get('latitude'))
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            lng, lat = item[0], item[1]
+        else:
+            raise models.ValidationError(_('Cada punto debe llevar latitud y longitud.'),
+                                        ERR_BAD_POINTS)
+        try:
+            lng, lat = float(lng), float(lat)
+        except (TypeError, ValueError):
+            raise models.ValidationError(_('Las coordenadas deben ser números.'), ERR_BAD_POINTS)
+        if not (-180 <= lng <= 180 and -90 <= lat <= 90):
+            raise models.ValidationError(_('Coordenadas fuera del rango geográfico.'),
+                                         ERR_BAD_POINTS)
+        points.append((lng, lat))
+    return points
+
+
+def _assist_settings(dataset, data):
+    """Los tres ajustes efectivos: lo que venga en la petición, y si no, lo del dataset.
+
+    Aceptarlos en la petición **y** guardarlos en el dataset no es duplicar: permite previsualizar
+    con un valor antes de decidir quedárselo, que es como se usa un control deslizante.
+    """
+    stored = dataset.get('assist') or models.default_assist()
+    return models.normalize_assist({
+        'granularity': data.get('granularity'),
+        'tolerance': data.get('tolerance'),
+        'elevation_weight': data.get('elevation_weight'),
+    }, stored)
+
+
+def assist_unavailable(exc):
+    """Respuesta cuando `scikit-image` no está disponible.
+
+    Es el único punto del plugin que depende de una dependencia instalada por el framework, y puede
+    faltar de verdad: un arranque en el que `check_requirements()` no llegó a correr, o un
+    `site-packages` a medio instalar. Lo que **no** puede pasar es que eso tumbe el etiquetado a
+    mano, que no la necesita para nada (FR-026, Principio III). Sale como `409` con un código propio
+    para que la interfaz pueda esconder la herramienta en vez de enseñar un error genérico.
+    """
+    return error(
+        _('La selección asistida no está disponible: falta una dependencia del plugin (%(detail)s). '
+          'El etiquetado a mano sigue funcionando.') % {'detail': exc},
+        ERR_ASSIST_UNAVAILABLE, status.HTTP_409_CONFLICT)
+
+
+def _provider(task, dataset, settings):
+    return regions.CellProvider(
+        str(task.id),
+        dataset['resolution_cm_px'],
+        granularity=settings['granularity'],
+        elevation_weight=settings['elevation_weight'],
+        elevation_source=dataset.get('elevation_source', models.DEFAULT_ELEVATION_SOURCE))
+
+
+class RegionSelect(_LabelViewBase):
+    """`POST datasets/<id>/tasks/<task>/regions` — la geometría de unas regiones del terreno.
+
+    **No crea etiquetas.** Devuelve geometría y el cliente decide si la guarda, por el endpoint de
+    etiquetas que ya existía. Separarlo mantiene toda la validación de etiquetas en un solo sitio y
+    permite que el arrastre de US2 previsualice en vivo y escriba una sola vez al soltar.
+    """
+
+    def post(self, request, dataset_id=None, pk=None):
+        task, dataset, failure = self.resolve(request, dataset_id, pk, write=True)
+        if failure is not None:
+            return failure
+
+        data = request.data
+        try:
+            points = _parse_points(data.get('points'))
+            settings = _assist_settings(dataset, data)
+        except models.ValidationError as exc:
+            return validation_error(exc)
+
+        try:
+            with _provider(task, dataset, settings) as provider:
+                selection = provider.select(points, tolerance=settings['tolerance'])
+                geometry = provider.geometry(selection.regions)
+                payload = {
+                    'geometry': geometry,
+                    'region_count': len(selection.regions),
+                    'elevation_source': provider.elevation_source,
+                    'band_count': provider.band_count,
+                    'truncated': selection.truncated,
+                    'prepared_cells': provider.prepared_cells,
+                }
+        except regions.NoOrthophoto:
+            return error(_('La tarea «%(name)s» no tiene ortofoto.') % {'name': task.name},
+                         ERR_NO_ORTHOPHOTO, status.HTTP_409_CONFLICT)
+        except ImportError as exc:
+            return assist_unavailable(exc)
+
+        if geometry is None:
+            # Pinchar fuera de la huella del vuelo **no es un error** (FR-025). Devolverlo como 400
+            # obligaría a la interfaz a enseñar una alerta roja por algo que el usuario hace cada
+            # dos por tres sin equivocarse en nada.
+            payload.update({
+                'reason': 'no_data',
+                'message': _('Ese punto está fuera de la zona cubierta por el vuelo.'),
+            })
+
+        return Response(payload)
+
+
+class RegionStatus(_LabelViewBase):
+    """`GET .../regions/status` — qué parte del encuadre ya está preparada (FR-024).
+
+    Existe para poder anunciar la espera **antes** de que ocurra. Sin esto, el primer clic sobre una
+    zona nueva deja el cursor colgado un segundo sin explicación, y un segundo sin explicación se
+    interpreta como que la herramienta no ha registrado el clic.
+
+    Es la **única** ruta de esta feature que mira el encuadre. `POST regions` no lo hace ni puede
+    hacerlo: si la respuesta dependiera de la vista, FR-008 se caería.
+    """
+
+    def get(self, request, dataset_id=None, pk=None):
+        task, dataset, failure = self.resolve(request, dataset_id, pk, write=False)
+        if failure is not None:
+            return failure
+
+        try:
+            bounds = _parse_bounds(request.query_params.get('bounds'))
+            settings = _assist_settings(dataset, request.query_params)
+        except models.ValidationError as exc:
+            return validation_error(exc)
+
+        try:
+            with _provider(task, dataset, settings) as provider:
+                grid = provider.grid
+                minx, miny = grid.lnglat_to_xy(bounds[0], bounds[1])
+                maxx, maxy = grid.lnglat_to_xy(bounds[2], bounds[3])
+                cells = grid.cells_for_bounds(min(minx, maxx), min(miny, maxy),
+                                              max(minx, maxx), max(miny, maxy))
+                ready = sum(1 for row, col in cells if provider.is_ready(row, col))
+                payload = {
+                    'cells_total': len(cells),
+                    'cells_ready': ready,
+                    'estimated_seconds': round((len(cells) - ready) * regions.SECONDS_PER_CELL, 1),
+                    'elevation_source': provider.elevation_source,
+                }
+        except regions.NoOrthophoto:
+            return error(_('La tarea «%(name)s» no tiene ortofoto.') % {'name': task.name},
+                         ERR_NO_ORTHOPHOTO, status.HTTP_409_CONFLICT)
+
+        return Response(payload)
+
+
+def _parse_bounds(raw):
+    """`minLon,minLat,maxLon,maxLat` a cuatro flotantes."""
+    parts = str(raw or '').split(',')
+    if len(parts) != 4:
+        raise models.ValidationError(
+            _('`bounds` debe ser minLon,minLat,maxLon,maxLat.'), ERR_BAD_BOUNDS)
+    try:
+        values = [float(p) for p in parts]
+    except (TypeError, ValueError):
+        raise models.ValidationError(_('`bounds` debe llevar cuatro números.'), ERR_BAD_BOUNDS)
+    if not (-180 <= values[0] <= 180 and -180 <= values[2] <= 180
+            and -90 <= values[1] <= 90 and -90 <= values[3] <= 90):
+        raise models.ValidationError(_('`bounds` cae fuera del rango geográfico.'), ERR_BAD_BOUNDS)
+    return values
 
 
 # --- Exportación -------------------------------------------------------------------------
